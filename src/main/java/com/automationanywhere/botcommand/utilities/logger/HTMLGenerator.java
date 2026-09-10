@@ -72,6 +72,19 @@ public class HTMLGenerator {
         return escaped;
     }
 
+    /**
+     * The type label shown next to a variable: the value class simple name without the
+     * {@code Object} / {@code Value} suffix, upper-cased. {@code NULL} when the value is null.
+     */
+    public static String typeLabel(Value value) {
+        if (value == null) {
+            return NULL;
+        }
+        return value.getClass().getSimpleName().toLowerCase()
+                .replace("object", "")
+                .replace("value", "").toUpperCase();
+    }
+
     public static String generateHTML(Map<String, Value> valueMap) {
         if (valueMap == null || valueMap.isEmpty()) {
             return "";
@@ -158,10 +171,7 @@ public class HTMLGenerator {
             htmlBuilder.append("<div class='variable-type'>NULL</div>\n")
                     .append("<div class='variable-value'>NULL</div>\n");
         } else {
-            String classname = value.getClass().getSimpleName();
-            String variableType = classname.toLowerCase()
-                    .replace("object", "")
-                    .replace("value", "").toUpperCase();
+            String variableType = typeLabel(value);
 
             if (isTopLevel) {
                 htmlBuilder.append("<div class='variable-type'>")
@@ -218,9 +228,7 @@ public class HTMLGenerator {
                 if (itemValue == null) {
                     htmlBuilder.append("<div class='variable-value'>NULL</div>\n");
                 } else {
-                    String itemType = itemValue.getClass().getSimpleName().toLowerCase()
-                            .replace("object", "")
-                            .replace("value", "").toUpperCase();
+                    String itemType = typeLabel(itemValue);
 
                     htmlBuilder.append("<div class='variable-type'>")
                             .append(StringEscapeUtils.escapeHtml4(itemType))
@@ -244,9 +252,7 @@ public class HTMLGenerator {
             return;
         }
 
-        String variableType = value.getClass().getSimpleName().toLowerCase()
-                .replace("object", "")
-                .replace("value", "").toUpperCase();
+        String variableType = typeLabel(value);
 
         switch (variableType) {
             case "LIST":
@@ -289,9 +295,7 @@ public class HTMLGenerator {
                 if (val == null) {
                     htmlBuilder.append("<div class='variable-value'>NULL</div>\n");
                 } else {
-                    String valType = val.getClass().getSimpleName().toLowerCase()
-                            .replace("object", "")
-                            .replace("value", "").toUpperCase();
+                    String valType = typeLabel(val);
 
                     htmlBuilder.append("<div class='variable-type'>")
                             .append(StringEscapeUtils.escapeHtml4(valType))

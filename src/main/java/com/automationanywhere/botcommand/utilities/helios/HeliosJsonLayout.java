@@ -1,6 +1,8 @@
 package com.automationanywhere.botcommand.utilities.helios;
 
+import com.automationanywhere.botcommand.data.Value;
 import com.automationanywhere.botcommand.utilities.logger.CustomHTMLLayout;
+import com.automationanywhere.botcommand.utilities.logger.HTMLGenerator;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.core.Layout;
 import org.apache.logging.log4j.core.LogEvent;
@@ -42,6 +44,12 @@ public class HeliosJsonLayout extends AbstractStringLayout {
 
     /** Same extraction Helios uses on parsed log files, so streamed rows group identically. */
     private static final Pattern TASK_PATTERN = Pattern.compile("[\\\\/]tasks[\\\\/](.*?)@", Pattern.CASE_INSENSITIVE);
+
+    /** Server-side cap on streamed variables per entry; the rest are dropped. */
+    private static final int MAX_VARIABLES = 100;
+
+    /** Server-side cap on one rendered variable value; longer text is cut and flagged. */
+    private static final int MAX_VALUE_CHARS = 8192;
 
     /** Live layouts by session key; the entry is removed by {@link #consumeStatus(String)}. */
     private static final Map<String, HeliosJsonLayout> REGISTRY = new ConcurrentHashMap<>();
@@ -90,6 +98,7 @@ public class HeliosJsonLayout extends AbstractStringLayout {
         String source = "";
         String screenPath = "";
         int variablesCount = 0;
+        JSONArray variables = new JSONArray();
 
         Object[] parameters = event.getMessage().getParameters();
         if (parameters != null && parameters.length > 0 && parameters[0] instanceof Map) {
@@ -102,9 +111,10 @@ public class HeliosJsonLayout extends AbstractStringLayout {
                     ? text(messageObject.get(CustomHTMLLayout.Columns.SCREENSHOT))
                     : videoPath;
 
-            Object variables = messageObject.get(CustomHTMLLayout.Columns.VARIABLES);
-            if (variables instanceof Map) {
-                variablesCount = ((Map<?, ?>) variables).size();
+            Object variableMap = messageObject.get(CustomHTMLLayout.Columns.VARIABLES);
+            if (variableMap instanceof Map) {
+                variablesCount = ((Map<?, ?>) variableMap).size();
+                variables = variablesJson((Map<String, Value>) variableMap);
             }
         } else {
             message = event.getMessage().getFormattedMessage();
@@ -123,12 +133,37 @@ public class HeliosJsonLayout extends AbstractStringLayout {
                 .put("user", CustomHTMLLayout.userName())
                 .put("message", message)
                 .put("variablesCount", variablesCount)
+                .put("variables", variables)
                 .put("screenPath", screenPath);
 
         return new JSONObject()
                 .put("firstOrdinal", ordinal.getAndIncrement())
                 .put("entries", new JSONArray().put(entry))
                 .toString();
+    }
+
+    /**
+     * The logged variables as the Helios entry array, in map order.
+     *
+     * <p>At most {@link #MAX_VARIABLES} entries are sent and each value is cut at
+     * {@link #MAX_VALUE_CHARS} characters with {@code truncated} set, matching what the server
+     * enforces. {@code variablesCount} still carries the count before the cap.
+     */
+    private static JSONArray variablesJson(Map<String, Value> variables) {
+        JSONArray array = new JSONArray();
+        for (Map.Entry<String, Value> variable : variables.entrySet()) {
+            if (array.length() >= MAX_VARIABLES) {
+                break;
+            }
+            String rendered = VariableText.render(variable.getValue());
+            boolean truncated = rendered.length() > MAX_VALUE_CHARS;
+            array.put(new JSONObject()
+                    .put("name", variable.getKey())
+                    .put("type", HTMLGenerator.typeLabel(variable.getValue()))
+                    .put("value", truncated ? rendered.substring(0, MAX_VALUE_CHARS) : rendered)
+                    .put("truncated", truncated));
+        }
+        return array;
     }
 
     /** Pulls {@code <name>} out of a {@code /tasks/<name>@} source path; empty when absent. */

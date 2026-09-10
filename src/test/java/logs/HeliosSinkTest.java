@@ -173,7 +173,7 @@ public class HeliosSinkTest {
             JSONArray array = call.body.getJSONArray("entries");
             Assert.assertEquals(array.length(), 1);
             JSONObject entry = array.getJSONObject(0);
-            Assert.assertEquals(entry.length(), 10);
+            Assert.assertEquals(entry.length(), 11);
             Assert.assertEquals(entry.getString("task"), "My Task");
             Assert.assertEquals(entry.getString("machine"), CustomHTMLLayout.machineName());
         }

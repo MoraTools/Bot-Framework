@@ -35,6 +35,10 @@
 - **Type:** `Map<String, Value>`
 - **Description:** A map of common datatype variables and their values to log, applicable if "Log variable values" is set to "Yes".
 
+## Helios Cloud streaming
+
+When the parent logger session has Helios Cloud streaming enabled, the logged variables are streamed with the entry: each one as its name, type label and plain-text value (lists, dictionaries, records and tables as JSON text). At most 100 variables per entry are sent and each value is cut at 8192 characters. With streaming disabled the variables stay on the runner, in the HTML log only.
+
 ## Output
 
 * **Type:** `File`
