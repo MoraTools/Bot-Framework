@@ -19,7 +19,9 @@ public final class HeliosConfig {
     public final String ingestKey;
     public final String executionId;
     public final String botUri;
-    /** Control Room file id when the bot URI carries one; empty otherwise. */
+    /** URI of the master Task Bot that started this run; empty when the logger runs in the master itself. */
+    public final String parentBotUri;
+    /** Control Room file id when the parent or bot URI carries one; empty otherwise. */
     public final String fileId;
     public final String machine;
     public final String user;
@@ -27,11 +29,13 @@ public final class HeliosConfig {
     public final ProxySelector proxySelector;
 
     public HeliosConfig(String baseUrl, String ingestKey, String executionId, String botUri,
-                        String fileId, String machine, String user, ProxySelector proxySelector) {
+                        String parentBotUri, String fileId, String machine, String user,
+                        ProxySelector proxySelector) {
         this.baseUrl = stripTrailingSlashes(baseUrl);
         this.ingestKey = ingestKey == null ? "" : ingestKey;
         this.executionId = nullToEmpty(executionId);
         this.botUri = nullToEmpty(botUri);
+        this.parentBotUri = nullToEmpty(parentBotUri);
         this.fileId = nullToEmpty(fileId);
         this.machine = nullToEmpty(machine);
         this.user = nullToEmpty(user);

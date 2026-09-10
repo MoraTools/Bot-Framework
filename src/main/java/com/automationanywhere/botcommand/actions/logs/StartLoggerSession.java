@@ -223,20 +223,23 @@ public class StartLoggerSession {
     /**
      * Collects the execution context the Helios Cloud server needs to identify this run.
      *
+     * <p>Both the bot that opened the logger session and its master Task Bot are captured; the
+     * master is blank when the logger runs in the master itself. The Control Room file id is read
+     * from the master when it carries one, otherwise from the bot itself.
+     *
      * <p>{@code globalSessionContext} is injected by the bot agent and is null in unit tests,
      * so every value falls back to a safe default.
      */
     private HeliosConfig buildHeliosConfig(String heliosUrl, SecureString ingestKey) {
         String executionId = "";
         String botUri = "";
+        String parentBotUri = "";
         ProxySelector proxySelector = null;
 
         if (globalSessionContext != null) {
             executionId = safe(globalSessionContext::getExecutionId);
             botUri = safe(globalSessionContext::getBotUri);
-            if (botUri.isEmpty()) {
-                botUri = safe(globalSessionContext::getParentBotUri);
-            }
+            parentBotUri = safe(globalSessionContext::getParentBotUri);
             try {
                 ProxyConfig proxyConfig = globalSessionContext.getProxyConfig();
                 proxySelector = proxyConfig == null ? null : proxyConfig.getProxySelector();
@@ -249,8 +252,13 @@ public class StartLoggerSession {
             executionId = UUID.randomUUID().toString();
         }
 
+        String fileId = queryParameter(parentBotUri, "fileId");
+        if (fileId.isEmpty()) {
+            fileId = queryParameter(botUri, "fileId");
+        }
+
         return new HeliosConfig(heliosUrl, ingestKey == null ? "" : ingestKey.getInsecureString(),
-                executionId, botUri, queryParameter(botUri, "fileId"),
+                executionId, botUri, parentBotUri, fileId,
                 CustomHTMLLayout.machineName(), CustomHTMLLayout.userName(), proxySelector);
     }
 

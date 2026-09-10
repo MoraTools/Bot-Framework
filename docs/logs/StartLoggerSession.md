@@ -127,7 +127,7 @@
 
 When streaming is enabled the action opens a remote session before the first entry is logged, then each `Log Message` call is posted to the server from a background thread.
 
-* **Session start** `POST {url}/api/ingest/sessions` with the execution id, bot URI, Control Room file id, machine, user, local start time and the UTC offset in minutes. The execution id comes from the bot agent; a random UUID is used when it is not available.
+* **Session start** `POST {url}/api/ingest/sessions` with the execution id, bot URI, master Task Bot URI, Control Room file id, machine, user, local start time and the UTC offset in minutes. Helios Cloud identifies the bot by its master Task Bot, so both URIs are sent: `botUri` is the bot that opened the logger session and `parentBotUri` is the master that started the run, empty when the logger runs in the master itself. The Control Room file id is read from the master URI when it carries one, otherwise from the bot URI. The execution id comes from the bot agent; a random UUID is used when it is not available.
 * **Entries** `POST {url}/api/ingest/sessions/{id}/entries`, one envelope per entry, carrying the same timestamp, level, source, task, machine, user, message, variable count and screenshot/clip path that the HTML row shows. Screenshots and clips stay on the runner; only their path is sent.
 * **Session end** `POST {url}/api/ingest/sessions/{id}/end`, sent by `Stop Logger Session`.
 

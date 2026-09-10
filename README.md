@@ -1,6 +1,6 @@
 # A360 Bot Framework Package
 
-**Version 4.1.0** - maintained by **jamir-boop**, forked from the original A360 Tools package.
+**Version 4.2.0** - maintained by **jamir-boop**, forked from the original A360 Tools package.
 
 ## Overview
 Designed to streamline bot development, enhance logging, and facilitate comprehensive documentation within tasks for A360. Tailored for efficiency, consistency, and ease of use, this package addresses common challenges in bot development and maintenance, making it an indispensable tool for modern automation projects.
@@ -97,7 +97,7 @@ Every logger session can optionally stream its entries live to a Helios Cloud se
 
 | Call | Payload |
 |---|---|
-| `POST {url}/api/ingest/sessions` | Execution id, bot URI, Control Room file id, machine, user, local start time, UTC offset in minutes. |
+| `POST {url}/api/ingest/sessions` | Execution id, bot URI, master Task Bot URI (empty when the logger runs in the master), Control Room file id, machine, user, local start time, UTC offset in minutes. |
 | `POST {url}/api/ingest/sessions/{id}/entries` | One envelope per entry: ordinal plus timestamp, UTC offset, level, source, task, machine, user, message, variable count, the logged variables and screenshot/clip path - the same values the HTML row shows. |
 | `POST {url}/api/ingest/sessions/{id}/end` | Sent by `Stop Logger Session` with `status` = the worst level logged (`ERROR`, `WARN` or `OK`). |
 

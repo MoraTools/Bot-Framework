@@ -43,6 +43,12 @@ public class HeliosSinkTest {
 
     private static final String SESSION_ID = "11111111-2222-3333-4444-555555555555";
     private static final String KEY = "hik_test_secret";
+    /** Bot that opens the logger session; its own fileId must lose to the master's. */
+    private static final String BOT_URI =
+            "file:///c/Automation Anywhere/tasks/My Task?workspace=PUBLIC&fileId=child-file";
+    /** Master Task Bot that started the run; Helios Cloud identifies the bot by this one. */
+    private static final String PARENT_BOT_URI =
+            "file:///c/Automation Anywhere/tasks/Master Task?workspace=PUBLIC&fileId=abc";
 
     private HttpServer server;
 
@@ -103,8 +109,8 @@ public class HeliosSinkTest {
     }
 
     private static HeliosConfig config(String baseUrl) {
-        return new HeliosConfig(baseUrl + "/", KEY, "execution-1",
-                "file:///c/Automation Anywhere/tasks/My Task?workspace=PUBLIC&fileId=abc",
+        // fileId is the master's, the way StartLoggerSession resolves it.
+        return new HeliosConfig(baseUrl + "/", KEY, "execution-1", BOT_URI, PARENT_BOT_URI,
                 "abc", "test-machine", "test-user", null);
     }
 
@@ -155,13 +161,16 @@ public class HeliosSinkTest {
         Call start = starts.get(0);
         Assert.assertEquals(start.key, KEY, "ingest key header");
         Assert.assertEquals(start.body.getString("executionId"), "execution-1");
-        Assert.assertEquals(start.body.getString("fileId"), "abc");
+        Assert.assertEquals(start.body.getString("fileId"), "abc",
+                "fileId is the master bot URI's, not the child's");
         Assert.assertEquals(start.body.getString("machine"), "test-machine");
         Assert.assertEquals(start.body.getString("user"), "test-user");
         Assert.assertTrue(start.body.getString("startedAt").matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}"),
                 "startedAt is local time yyyy-MM-dd'T'HH:mm:ss but was " + start.body.getString("startedAt"));
         Assert.assertTrue(start.body.has("utcOffsetMinutes"));
-        Assert.assertTrue(start.body.has("botUri"));
+        Assert.assertEquals(start.body.getString("botUri"), BOT_URI);
+        Assert.assertEquals(start.body.getString("parentBotUri"), PARENT_BOT_URI,
+                "the master Task Bot travels next to the bot URI");
 
         List<Call> entries = callsEndingWith("/entries");
         Assert.assertEquals(entries.size(), 3, "one request per entry");
@@ -190,6 +199,23 @@ public class HeliosSinkTest {
         Assert.assertTrue(end.body.has("utcOffsetMinutes"));
 
         Assert.assertEquals(countRows(logFile), 3, "HTML log still holds every row");
+    }
+
+    @Test
+    public void parentBotUriIsSentEmptyWhenTheLoggerRunsInTheMaster() throws Exception {
+        String baseUrl = startStubServer();
+        Path logFile = newLogFile();
+
+        HeliosConfig noParent = new HeliosConfig(baseUrl, KEY, "execution-1", BOT_URI, null,
+                "child-file", "test-machine", "test-user", null);
+        CustomLogger session = new CustomLogger("CustomLogger_" + UUID.randomUUID(), logFile.toString(),
+                1000, 0, new HashSet<>(), EncodingMode.FAST, noParent);
+        session.getLogger().info(row("only info"));
+        session.close();
+
+        JSONObject start = callsEndingWith("/api/ingest/sessions").get(0).body;
+        Assert.assertEquals(start.getString("parentBotUri"), "", "unknown master is sent as an empty string");
+        Assert.assertEquals(start.getString("fileId"), "child-file", "the bot's own fileId is used instead");
     }
 
     @Test

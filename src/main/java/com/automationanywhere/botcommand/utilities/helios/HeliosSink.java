@@ -65,6 +65,7 @@ public final class HeliosSink {
             JSONObject body = new JSONObject()
                     .put("executionId", config.executionId)
                     .put("botUri", config.botUri)
+                    .put("parentBotUri", config.parentBotUri)
                     .put("fileId", config.fileId)
                     .put("machine", config.machine)
                     .put("user", config.user)
