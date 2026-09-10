@@ -1,7 +1,10 @@
 package com.automationanywhere.botcommand.actions.logs;
 
+import com.automationanywhere.bot.model.ProxyConfig;
 import com.automationanywhere.botcommand.data.impl.SessionValue;
 import com.automationanywhere.botcommand.exception.BotCommandException;
+import com.automationanywhere.botcommand.utilities.helios.HeliosConfig;
+import com.automationanywhere.botcommand.utilities.logger.CustomHTMLLayout;
 import com.automationanywhere.botcommand.utilities.logger.CustomLogger;
 import com.automationanywhere.botcommand.utilities.screen.recorder.EncodingMode;
 import com.automationanywhere.commandsdk.annotations.*;
@@ -9,8 +12,10 @@ import com.automationanywhere.commandsdk.annotations.rules.*;
 import com.automationanywhere.commandsdk.model.AttributeType;
 import com.automationanywhere.commandsdk.model.DataType;
 import com.automationanywhere.commandsdk.model.ReturnSettingsType;
+import com.automationanywhere.core.security.SecureString;
 import org.apache.logging.log4j.Level;
 
+import java.net.ProxySelector;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -42,7 +47,15 @@ public class StartLoggerSession {
     private static final String VIDEO_ENABLED = "VIDEO_ENABLED";
     private static final String ENCODING_FAST = "FAST";
     private static final String ENCODING_COMPACT = "COMPACT";
+    private static final String HELIOS_DISABLED = "HELIOS_DISABLED";
+    private static final String HELIOS_ENABLED = "HELIOS_ENABLED";
 
+    @GlobalSessionContext
+    private com.automationanywhere.bot.service.GlobalSessionContext globalSessionContext;
+
+    public void setGlobalSessionContext(com.automationanywhere.bot.service.GlobalSessionContext globalSessionContext) {
+        this.globalSessionContext = globalSessionContext;
+    }
 
     @Execute
     public SessionValue start(
@@ -135,7 +148,33 @@ public class StartLoggerSession {
                     default_value = ENCODING_FAST, default_value_type = DataType.STRING)
             @SelectModes
             @NotEmpty
-            String encodingMode
+            String encodingMode,
+
+            @Idx(index = "4", type = AttributeType.SELECT, options = {
+                    @Idx.Option(index = "4.1", pkg = @Pkg(label = "Disabled", value = HELIOS_DISABLED)),
+                    @Idx.Option(index = "4.2", pkg = @Pkg(label = "Enabled", value = HELIOS_ENABLED))})
+            @Pkg(label = "Helios Cloud streaming",
+                    description = "Streams every entry of this session to a Helios Cloud server "
+                            + "while the bot runs. The HTML log is written either way.",
+                    default_value = HELIOS_DISABLED, default_value_type = DataType.STRING)
+            @SelectModes
+            @NotEmpty
+            String heliosStreaming,
+
+            @Idx(index = "4.2.1", type = AttributeType.TEXT)
+            @Pkg(label = "Helios Cloud URL",
+                    description = "Server root, for example http://192.168.18.5:5180",
+                    default_value_type = DataType.STRING)
+            @NotEmpty
+            String heliosUrl,
+
+            @Idx(index = "4.2.2", type = AttributeType.CREDENTIAL)
+            @Pkg(label = "Helios ingest key",
+                    description = "Ingest key issued for the Control Room this bot belongs to.",
+                    default_value_type = DataType.STRING)
+            @CredentialAllowPassword
+            @NotEmpty
+            SecureString heliosIngestKey
 
     ) {
         try {
@@ -151,11 +190,14 @@ public class StartLoggerSession {
             EncodingMode mode = ENCODING_COMPACT.equals(encodingMode)
                     ? EncodingMode.COMPACT : EncodingMode.FAST;
 
+            HeliosConfig heliosConfig = HELIOS_ENABLED.equals(heliosStreaming)
+                    ? buildHeliosConfig(heliosUrl, heliosIngestKey) : null;
+
             CustomLogger customLogger;
             switch (logLevelsAndFileOption) {
                 case COMMON_FILE_ALL_LEVEL:
                     customLogger = new CustomLogger("CustomLogger_" + UUID.randomUUID(), logFilePath,
-                            maxLogEntries.intValue(), bufferSec, recordingLevels, mode);
+                            maxLogEntries.intValue(), bufferSec, recordingLevels, mode, heliosConfig);
                     break;
                 case CONFIGURABLE_FILE_ALL_LEVEL:
                     Map<Level, String> levelFilePathMap = new HashMap<>();
@@ -163,7 +205,7 @@ public class StartLoggerSession {
                     levelFilePathMap.put(Level.WARN, warnLogFilePath);
                     levelFilePathMap.put(Level.ERROR, errorLogFilePath);
                     customLogger = new CustomLogger("CustomLogger_" + UUID.randomUUID(), levelFilePathMap,
-                            maxLogEntries.intValue(), bufferSec, recordingLevels, mode);
+                            maxLogEntries.intValue(), bufferSec, recordingLevels, mode, heliosConfig);
                     break;
                 default:
                     throw new BotCommandException("Invalid log level and file option");
@@ -175,6 +217,64 @@ public class StartLoggerSession {
                     .build();
         } catch (Exception e) {
             throw new BotCommandException("Error occurred while creating new session: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Collects the execution context the Helios Cloud server needs to identify this run.
+     *
+     * <p>{@code globalSessionContext} is injected by the bot agent and is null in unit tests,
+     * so every value falls back to a safe default.
+     */
+    private HeliosConfig buildHeliosConfig(String heliosUrl, SecureString ingestKey) {
+        String executionId = "";
+        String botUri = "";
+        ProxySelector proxySelector = null;
+
+        if (globalSessionContext != null) {
+            executionId = safe(globalSessionContext::getExecutionId);
+            botUri = safe(globalSessionContext::getBotUri);
+            if (botUri.isEmpty()) {
+                botUri = safe(globalSessionContext::getParentBotUri);
+            }
+            try {
+                ProxyConfig proxyConfig = globalSessionContext.getProxyConfig();
+                proxySelector = proxyConfig == null ? null : proxyConfig.getProxySelector();
+            } catch (Exception ignored) {
+                // No proxy available; direct connections are the norm.
+            }
+        }
+
+        if (executionId.trim().isEmpty()) {
+            executionId = UUID.randomUUID().toString();
+        }
+
+        return new HeliosConfig(heliosUrl, ingestKey == null ? "" : ingestKey.getInsecureString(),
+                executionId, botUri, queryParameter(botUri, "fileId"),
+                CustomHTMLLayout.machineName(), CustomHTMLLayout.userName(), proxySelector);
+    }
+
+    /** Reads one query parameter out of a bot URI; empty when the URI does not carry it. */
+    private static String queryParameter(String botUri, String name) {
+        int queryStart = botUri.indexOf('?');
+        if (queryStart < 0) {
+            return "";
+        }
+        for (String parameter : botUri.substring(queryStart + 1).split("&")) {
+            String[] pair = parameter.split("=", 2);
+            if (pair.length == 2 && pair[0].equalsIgnoreCase(name)) {
+                return pair[1];
+            }
+        }
+        return "";
+    }
+
+    private static String safe(java.util.function.Supplier<String> supplier) {
+        try {
+            String value = supplier.get();
+            return value == null ? "" : value;
+        } catch (Exception e) {
+            return "";
         }
     }
 }

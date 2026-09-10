@@ -1,5 +1,7 @@
 # A360 Bot Framework Package
 
+**Version 4.0.0** - maintained by **jamir-boop**, forked from the original A360 Tools package.
+
 ## Overview
 Designed to streamline bot development, enhance logging, and facilitate comprehensive documentation within tasks for A360. Tailored for efficiency, consistency, and ease of use, this package addresses common challenges in bot development and maintenance, making it an indispensable tool for modern automation projects.
 
@@ -8,6 +10,7 @@ Designed to streamline bot development, enhance logging, and facilitate comprehe
 ## Use Cases
 - **Framework Templating**: Ideal for organizations looking to standardize bot development practices across multiple teams.
 - **Detailed Logging**: Suited for complex workflows where detailed traceability and error tracking are crucial.
+- **Live Run Monitoring**: Optionally stream every log entry of a session to a Helios Cloud server as the bot runs, so operators watch executions live instead of collecting HTML files afterwards. See [Helios Cloud streaming](#helios-cloud-streaming) below.
 - **Visual Failure Replay**: Optionally attach a short MP4 of the seconds leading up to each WARN/ERROR entry, so post-mortems show exactly what the screen looked like at the moment of failure. See [Robust Logging](#robust-logging) and [Bundled FFmpeg](#bundled-ffmpeg) below.
 - **Process Documentation**: Perfect for documenting automated processes within the bot, ensuring clarity and ease of maintenance.
 
@@ -22,6 +25,11 @@ Designed to streamline bot development, enhance logging, and facilitate comprehe
 - Log file separation per level: send all log levels to a single file, or split INFO / WARN / ERROR into separate files.
 - Screenshot capture alongside log messages for a complete logging experience.
 - **Rolling screen-recording buffer**: opt-in continuous capture of the last N seconds (5-90, default 30) of bot activity. When a log entry fires at a configured level (any combination of INFO/WARN/ERROR), the buffer is finalized into a browser-playable MP4 placed next to the log. Choose between **Fast** (H.264, larger files, faster encoding, recommended) and **Compact** (AV1, smaller files, slower encoding) per session. On JVM crash or drain timeout, both the rolling buffer and any pending per-error clips are salvaged on the next bot startup so the HTML log's video links self-heal at the paths they already reference.
+
+### [Helios Cloud Streaming](https://github.com/A360-Tools/Bot-Framework/blob/main/docs/logs/StartLoggerSession.md)
+- Opt-in per session: pick a Helios Cloud URL and an ingest key on `Start Logger Session`, and every entry is posted to the server while the bot runs.
+- Purely additive: the HTML log, screenshots, video clips and rollover are byte-for-byte the same whether streaming is on or off.
+- Never fails the bot: any ingest failure produces a single WARN row in the HTML log and nothing else.
 
 ### [Config Data Reading](https://github.com/A360-Tools/Bot-Framework/tree/main/docs/config)
 - Reads configuration data from CSV, Excel, JSON, and XML formats into dictionaries.
@@ -72,6 +80,32 @@ Designed to streamline bot development, enhance logging, and facilitate comprehe
 - **Documentation About/Caution Sequence/Comment/Sequence**: Offers a range of documentation utilities from basic commenting to detailed sequence documentation with caution highlights and screenshots.
 - **Log Message**: Provides session-based logging with options for detailed messages and screenshots.
 - **Logs Start/Stop Session**: Manages the lifecycle of logging sessions, from initiation to termination. Always pair `Start Logger Session` with `Stop Logger Session` in a Finally block so logs flush and any pending video clips finalize.
+
+## Helios Cloud streaming
+
+Every logger session can optionally stream its entries live to a Helios Cloud server. The feature is off by default and existing bots keep working unchanged after upgrading the package: the new inputs were added, none were moved or renamed.
+
+### Inputs on `Start Logger Session`
+
+| Input | Type | Notes |
+|---|---|---|
+| Helios Cloud streaming | Select | `Disabled` (default) or `Enabled`. |
+| Helios Cloud URL | Text | Server root, for example `http://192.168.18.5:5180`. Required when enabled. |
+| Helios ingest key | Credential | Ingest key issued for the Control Room (`hik_<prefix>_<secret>`). Credential Vault attribute or bot password. Required when enabled. |
+
+### What is sent
+
+| Call | Payload |
+|---|---|
+| `POST {url}/api/ingest/sessions` | Execution id, bot URI, Control Room file id, machine, user, local start time, UTC offset in minutes. |
+| `POST {url}/api/ingest/sessions/{id}/entries` | One envelope per entry: ordinal plus timestamp, UTC offset, level, source, task, machine, user, message, variable count and screenshot/clip path - the same values the HTML row shows. |
+| `POST {url}/api/ingest/sessions/{id}/end` | Sent by `Stop Logger Session` with `status` = the worst level logged (`ERROR`, `WARN` or `OK`). |
+
+The ingest key travels in the `X-Helios-Ingest-Key` header. Screenshots and video clips stay on the runner; only their paths are sent. No variable values leave the machine, only how many were logged.
+
+### Failure behaviour
+
+Streaming never fails the bot. When the server is unreachable, the session start is rejected, or the key is wrong, the action writes exactly one WARN row into the HTML log stating that streaming is off for the session and the bot continues. Entries are queued in a bounded non-blocking buffer, so a slow or dead server drops streamed entries rather than holding the bot up, and the HTML log is always complete.
 
 ## Bundled FFmpeg
 

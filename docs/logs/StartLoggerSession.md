@@ -100,6 +100,39 @@
   * `Compact: smaller files, slower encoding`: AV1 (libaom, cpu-used 8). Each clip encodes in ~5-15 s and lands at ~1-3 MB. Choose this when long-term clip storage matters more than encode latency.
 * **Default:** `Fast`
 
+### Helios Cloud streaming
+
+* **Type:** `Select`
+* **Options:**
+  * `Disabled`: The session writes the HTML log only. Nothing leaves the runner.
+  * `Enabled`: Every entry of this session is also streamed to a Helios Cloud server while the bot runs.
+* **Default:** `Disabled`
+* **Description:** Streaming is additive. The HTML log, screenshots, video clips and rollover behave exactly the same whether streaming is on or off.
+
+### Helios Cloud URL
+
+* **Condition:** Required if "Helios Cloud streaming" is set to `Enabled`.
+* **Type:** `Text`
+* **Description:** Server root, for example `http://192.168.18.5:5180`. A trailing slash is ignored. The action appends `/api/ingest/...` itself.
+* **Constraints:** Cannot be empty.
+
+### Helios ingest key
+
+* **Condition:** Required if "Helios Cloud streaming" is set to `Enabled`.
+* **Type:** `Credential`
+* **Description:** Ingest key issued for the Control Room this bot belongs to (`hik_<prefix>_<secret>`). Sent as the `X-Helios-Ingest-Key` header on every request. A Credential Vault attribute or a bot password are both accepted.
+* **Constraints:** Cannot be empty.
+
+## Helios Cloud streaming
+
+When streaming is enabled the action opens a remote session before the first entry is logged, then each `Log Message` call is posted to the server from a background thread.
+
+* **Session start** `POST {url}/api/ingest/sessions` with the execution id, bot URI, Control Room file id, machine, user, local start time and the UTC offset in minutes. The execution id comes from the bot agent; a random UUID is used when it is not available.
+* **Entries** `POST {url}/api/ingest/sessions/{id}/entries`, one envelope per entry, carrying the same timestamp, level, source, task, machine, user, message, variable count and screenshot/clip path that the HTML row shows. Screenshots and clips stay on the runner; only their path is sent.
+* **Session end** `POST {url}/api/ingest/sessions/{id}/end`, sent by `Stop Logger Session`.
+
+**Failure behaviour.** Streaming never fails the bot. If the server cannot be reached, the session start fails, or the key is rejected, the action writes one WARN row into the HTML log explaining that streaming is off for the session and carries on. Entries are queued in a bounded non-blocking buffer, so a slow or dead server drops streamed entries instead of holding the bot up. The HTML log is always complete.
+
 ## Output
 
 * **Type:** `Session`
@@ -118,3 +151,5 @@ Throws `BotCommandException` if:
 * Any other error occurs during logger session initialization (e.g., file access issues). The specific error message will be included.
 
 If the screen recorder fails to start (for example, when running headless or when the bundled ffmpeg cannot extract), the session degrades silently to the existing screenshot-only path rather than failing the bot.
+
+Helios Cloud streaming never raises `BotCommandException`. Any ingest failure is reported as a single WARN row in the HTML log.

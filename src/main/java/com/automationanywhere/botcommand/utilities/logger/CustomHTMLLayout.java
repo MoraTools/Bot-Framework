@@ -57,6 +57,24 @@ public class CustomHTMLLayout extends AbstractStringLayout {
         return new Builder();
     }
 
+    /**
+     * Renders an event timestamp exactly as it appears in the first column of the HTML log.
+     * Shared so streamed rows carry the same text as the file they mirror.
+     */
+    public static String formatTimestamp(long epochMilli) {
+        return dateFormat.format(Instant.ofEpochMilli(epochMilli));
+    }
+
+    /** Host name shown in the Machine column. */
+    public static String machineName() {
+        return machine;
+    }
+
+    /** Account name shown in the User column. */
+    public static String userName() {
+        return user;
+    }
+
     @Override
     public String toSerializable(LogEvent event) {
         String formattedContent;
@@ -132,7 +150,7 @@ public class CustomHTMLLayout extends AbstractStringLayout {
                         "<td>%s</td>" +
                         "<td>%s</td>" +
                         "</tr>",
-                StringEscapeUtils.escapeHtml4(dateFormat.format(Instant.ofEpochMilli(event.getTimeMillis()))),
+                StringEscapeUtils.escapeHtml4(formatTimestamp(event.getTimeMillis())),
                 levelClass,
                 StringEscapeUtils.escapeHtml4(event.getLevel().toString()),
                 StringEscapeUtils.escapeHtml4(sourceBotPath),

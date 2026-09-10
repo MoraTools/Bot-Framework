@@ -74,7 +74,7 @@ public class VideoRecordingIntegrationTest {
                 /* videoOnWarn             */ false,
                 /* videoOnError            */ true,
                 /* videoBufferSeconds      */ 5,
-                /* encodingMode            */ "COMPACT");
+                /* encodingMode            */ "COMPACT", "HELIOS_DISABLED", null, null);
         logger = (CustomLogger) sv.getSession();
         Assert.assertTrue(logger.shouldRecordVideoFor(org.apache.logging.log4j.Level.ERROR),
                 "logger must report video-on for ERROR after start()");
@@ -145,7 +145,7 @@ public class VideoRecordingIntegrationTest {
                 logFile.toString(),
                 null, null, null,
                 100,
-                "VIDEO_ENABLED", false, false, true, 3, "FAST");
+                "VIDEO_ENABLED", false, false, true, 3, "FAST", "HELIOS_DISABLED", null, null);
         logger = (CustomLogger) sv.getSession();
         Assert.assertTrue(logger.shouldRecordVideoFor(org.apache.logging.log4j.Level.ERROR));
 
@@ -176,7 +176,7 @@ public class VideoRecordingIntegrationTest {
                 logFile.toString(),
                 null, null, null,
                 100,
-                "VIDEO_ENABLED", false, false, true, 5, "COMPACT");
+                "VIDEO_ENABLED", false, false, true, 5, "COMPACT", "HELIOS_DISABLED", null, null);
         logger = (CustomLogger) sv.getSession();
 
         // No need to wait for the buffer here - INFO is not in recordingLevels,

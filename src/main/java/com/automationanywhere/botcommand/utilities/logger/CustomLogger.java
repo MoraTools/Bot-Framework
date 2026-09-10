@@ -1,5 +1,8 @@
 package com.automationanywhere.botcommand.utilities.logger;
 
+import com.automationanywhere.botcommand.utilities.helios.HeliosConfig;
+import com.automationanywhere.botcommand.utilities.helios.HeliosJsonLayout;
+import com.automationanywhere.botcommand.utilities.helios.HeliosSink;
 import com.automationanywhere.botcommand.utilities.screen.recorder.EncodingMode;
 import com.automationanywhere.botcommand.utilities.screen.recorder.ScreenRecorder;
 import com.automationanywhere.toolchain.runtime.session.CloseableSessionObject;
@@ -10,6 +13,7 @@ import org.apache.logging.log4j.core.LoggerContext;
 import org.apache.logging.log4j.core.config.builder.api.AppenderComponentBuilder;
 import org.apache.logging.log4j.core.config.builder.api.ConfigurationBuilder;
 import org.apache.logging.log4j.core.config.builder.api.LayoutComponentBuilder;
+import org.apache.logging.log4j.core.config.builder.api.LoggerComponentBuilder;
 import org.apache.logging.log4j.core.config.builder.impl.BuiltConfiguration;
 import org.apache.logging.log4j.core.config.builder.impl.DefaultConfigurationBuilder;
 
@@ -38,9 +42,18 @@ public class CustomLogger implements CloseableSessionObject {
     private final Map<Level, String> variablesFolderPaths;
     private final ScreenRecorder recorder;
 
+    /** Non-null only while Helios Cloud streaming is enabled for this session. */
+    private HeliosSink heliosSink;
+
     // Constructor for a single log file for all levels (no video recording)
     public CustomLogger(String loggerName, String logFilePath, int maxLogEntries) throws IOException {
         this(loggerName, logFilePath, maxLogEntries, 0, new HashSet<>(), EncodingMode.FAST);
+    }
+
+    public CustomLogger(String loggerName, String logFilePath, int maxLogEntries,
+                        int bufferSeconds, Set<Level> recordingLevels,
+                        EncodingMode encodingMode) throws IOException {
+        this(loggerName, logFilePath, maxLogEntries, bufferSeconds, recordingLevels, encodingMode, null);
     }
 
     /**
@@ -49,10 +62,11 @@ public class CustomLogger implements CloseableSessionObject {
      * @param bufferSeconds   rolling-buffer length in seconds; ignored if {@code recordingLevels} is empty
      * @param recordingLevels levels at which video clips should be saved; empty disables recording
      * @param encodingMode    encoder used when finalizing per-error clips; ignored when recording is off
+     * @param heliosConfig    Helios Cloud streaming settings, or {@code null} to keep streaming off
      */
     public CustomLogger(String loggerName, String logFilePath, int maxLogEntries,
                         int bufferSeconds, Set<Level> recordingLevels,
-                        EncodingMode encodingMode) throws IOException {
+                        EncodingMode encodingMode, HeliosConfig heliosConfig) throws IOException {
         this.loggerId = UUID.randomUUID().toString();
 
         // Create screenshot folder at the same location as log file
@@ -86,8 +100,14 @@ public class CustomLogger implements CloseableSessionObject {
                 logFilePath,
                 maxLogEntries);
         builder.add(appenderBuilder);
-        builder.add(builder.newLogger(loggerName, Level.INFO)
-                .add(builder.newAppenderRef("COMBINED_" + loggerId)));
+
+        LoggerComponentBuilder loggerBuilder = builder.newLogger(loggerName, Level.INFO)
+                .add(builder.newAppenderRef("COMBINED_" + loggerId));
+        String heliosRef = addHeliosAppenders(builder, heliosConfig);
+        if (heliosRef != null) {
+            loggerBuilder.add(builder.newAppenderRef(heliosRef));
+        }
+        builder.add(loggerBuilder);
 
         builder.add(builder.newRootLogger(Level.INFO));
 
@@ -103,6 +123,9 @@ public class CustomLogger implements CloseableSessionObject {
 
         // Get logger from the new context
         this.logger = context.getLogger(loggerName);
+        if (heliosSink != null) {
+            heliosSink.attachLogger(this.logger);
+        }
 
         // Optionally start the screen recorder. Returns DISABLED on any failure.
         Path logDir = Paths.get(FilenameUtils.getFullPath(logFilePath));
@@ -131,7 +154,8 @@ public class CustomLogger implements CloseableSessionObject {
 
     private void setupLoggerConfiguration(ConfigurationBuilder<BuiltConfiguration> builder) {
         builder.setConfigurationName("CustomLogger-" + loggerId);
-        builder.setPackages("com.automationanywhere.botcommand.utilities.logger");
+        builder.setPackages("com.automationanywhere.botcommand.utilities.logger,"
+                + "com.automationanywhere.botcommand.utilities.helios");
         builder.setMonitorInterval("30");
         builder.setStatusLevel(Level.ERROR);
     }
@@ -163,6 +187,53 @@ public class CustomLogger implements CloseableSessionObject {
                 .addComponent(builder.newComponent("DefaultRolloverStrategy")
                     .addAttribute("fileIndex", "nomax")
             );
+    }
+
+    /**
+     * Opens the remote Helios Cloud session and wires an Async -> Http appender pair that
+     * streams every entry of this session to it.
+     *
+     * <p>Called while the configuration is still being built, because the entries URL embeds
+     * the server-assigned session id. When the remote session cannot be opened, nothing is
+     * added: the HTML log keeps working and {@link HeliosSink} writes one WARN row into it.
+     *
+     * @return the appender name the session logger must reference, or {@code null} when
+     *         streaming is off or unavailable
+     */
+    private String addHeliosAppenders(ConfigurationBuilder<BuiltConfiguration> builder, HeliosConfig heliosConfig) {
+        if (heliosConfig == null) {
+            return null;
+        }
+        this.heliosSink = new HeliosSink(heliosConfig);
+        if (heliosSink.startSession() == null) {
+            return null;
+        }
+
+        String httpName = "HELIOS_HTTP_" + loggerId;
+        String asyncName = "HELIOS_" + loggerId;
+
+        builder.add(builder.newAppender(httpName, "Http")
+                .addAttribute("url", heliosSink.entriesUrl())
+                .addAttribute("connectTimeoutMillis", 10000)
+                .addAttribute("readTimeoutMillis", 10000)
+                .addAttribute("ignoreExceptions", true)
+                .addComponent(builder.newComponent("Property")
+                        .addAttribute("name", HeliosSink.KEY_HEADER)
+                        .addAttribute("value", heliosConfig.ingestKey))
+                .addComponent(builder.newLayout("HeliosJsonLayout")
+                        .addAttribute("charset", "UTF-8")
+                        .addAttribute("sessionKey", loggerId)));
+
+        // Async so a slow or dead server never blocks the bot; non-blocking so a full buffer
+        // drops entries instead of stalling the caller.
+        builder.add(builder.newAppender(asyncName, "Async")
+                .addAttribute("bufferSize", 1024)
+                .addAttribute("blocking", false)
+                .addAttribute("ignoreExceptions", true)
+                .addAttribute("shutdownTimeout", 5000)
+                .addComponent(builder.newAppenderRef(httpName)));
+
+        return asyncName;
     }
 
     /**
@@ -238,16 +309,23 @@ public class CustomLogger implements CloseableSessionObject {
         this(loggerName, levelFilePathMap, maxLogEntries, 0, new HashSet<>(), EncodingMode.FAST);
     }
 
+    public CustomLogger(String loggerName, Map<Level, String> levelFilePathMap, int maxLogEntries,
+                        int bufferSeconds, Set<Level> recordingLevels,
+                        EncodingMode encodingMode) throws IOException {
+        this(loggerName, levelFilePathMap, maxLogEntries, bufferSeconds, recordingLevels, encodingMode, null);
+    }
+
     /**
      * Constructor for multiple log files based on level, with optional screen recording.
      *
      * @param bufferSeconds   rolling-buffer length in seconds; ignored if {@code recordingLevels} is empty
      * @param recordingLevels levels at which video clips should be saved; empty disables recording
      * @param encodingMode    encoder used when finalizing per-error clips; ignored when recording is off
+     * @param heliosConfig    Helios Cloud streaming settings, or {@code null} to keep streaming off
      */
     public CustomLogger(String loggerName, Map<Level, String> levelFilePathMap, int maxLogEntries,
                         int bufferSeconds, Set<Level> recordingLevels,
-                        EncodingMode encodingMode) throws IOException {
+                        EncodingMode encodingMode, HeliosConfig heliosConfig) throws IOException {
         this.loggerId = UUID.randomUUID().toString();
         this.screenshotFolderPaths = new HashMap<>();
         this.variablesFolderPaths = new HashMap<>();
@@ -287,11 +365,15 @@ public class CustomLogger implements CloseableSessionObject {
         }
 
         // Configure the logger
-        builder.add(builder.newLogger(loggerName, Level.INFO)
+        LoggerComponentBuilder loggerBuilder = builder.newLogger(loggerName, Level.INFO)
                 .add(builder.newAppenderRef(Level.INFO.name() + "_" + loggerId))
                 .add(builder.newAppenderRef(Level.WARN.name() + "_" + loggerId))
-                .add(builder.newAppenderRef(Level.ERROR.name() + "_" + loggerId))
-        );
+                .add(builder.newAppenderRef(Level.ERROR.name() + "_" + loggerId));
+        String heliosRef = addHeliosAppenders(builder, heliosConfig);
+        if (heliosRef != null) {
+            loggerBuilder.add(builder.newAppenderRef(heliosRef));
+        }
+        builder.add(loggerBuilder);
 
         builder.add(builder.newRootLogger(Level.INFO));
 
@@ -308,6 +390,9 @@ public class CustomLogger implements CloseableSessionObject {
 
         // Get logger from the new context
         this.logger = context.getLogger(loggerName);
+        if (heliosSink != null) {
+            heliosSink.attachLogger(this.logger);
+        }
 
         // Optionally start the screen recorder. Recording artifacts (clips/, screenshots/posters)
         // live next to the INFO log file because the HTML log uses relative paths.
@@ -342,15 +427,20 @@ public class CustomLogger implements CloseableSessionObject {
     }
 
     @Override
-    public void close() {
+    public synchronized void close() {
         if (!isClosed()) {
-            // Stop the screen recorder first (if any). Order matters: stage-1 stops
-            // writing to the ring before pending stage-2 encodes drain, and the
+            // Shutdown this specific logger context. This also drains the async Helios
+            // appender, so every streamed entry lands before the session is ended below.
+            loggerContext.stop();
+
+            if (heliosSink != null) {
+                heliosSink.endSession(HeliosJsonLayout.consumeStatus(loggerId));
+            }
+
+            // Stop the screen recorder (if any). Order matters within the recorder: stage-1
+            // stops writing to the ring before pending stage-2 encodes drain, and the
             // session folder is deleted only after both are quiescent.
             recorder.close();
-
-            // Shutdown this specific logger context
-            loggerContext.stop();
         }
     }
 
