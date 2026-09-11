@@ -18,11 +18,12 @@ This action is **idempotent**: invoking it on a session that is already closed r
 
 Stopping a session runs in this order:
 
-1. The Log4j2 context is stopped, which flushes the HTML log and drains any queued Helios Cloud entries.
-2. When Helios Cloud streaming was enabled and the remote session was opened, `POST {url}/api/ingest/sessions/{id}/end` closes it. The reported `status` is the worst level logged during the session: `ERROR` if any ERROR entry was written, `WARN` if any WARN entry was written, otherwise `OK`.
-3. The screen recorder is stopped and any pending video clips are finalized.
+1. Cloud capture stops and the expected entry count is saved to the disk journal.
+2. The sender flushes remaining batches and sends `POST {url}/api/ingest/sessions/{id}/end` with `expectedEntries` and the worst logged status (`ERROR`, `WARN` or `OK`). Helios verifies every ordinal before confirming delivery. Gaps trigger replay with the same ordinals and timestamps.
+3. The caller waits up to 5 seconds for delivery, plus up to 1 second to stop the sender. Unverified journals remain on disk for retry at a later logger startup with the same URL and key. A pending-delivery warning is written while the HTML logger is still open.
+4. The HTML logger closes, then the screen recorder stops and finalizes pending clips.
 
-A Helios Cloud failure at this point is swallowed like every other ingest failure; the session still closes and the bot still finishes.
+Cloud delivery never fails the bot. A disk buffer failure is reported in HTML; buffered records remain on disk. See [buffer size and recovery limits](../../README.md#failure-behaviour).
 
 ## Exceptions
 

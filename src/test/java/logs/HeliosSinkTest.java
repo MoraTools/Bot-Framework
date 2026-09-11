@@ -13,6 +13,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 import org.testng.Assert;
 import org.testng.annotations.AfterMethod;
+import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
 import java.io.IOException;
@@ -51,6 +52,17 @@ public class HeliosSinkTest {
             "file:///c/Automation Anywhere/tasks/Master Task?workspace=PUBLIC&fileId=abc";
 
     private HttpServer server;
+    private Path outbox;
+    private volatile boolean rejectOnce;
+    private volatile boolean omitMiddleOnce;
+    private final Map<Integer, JSONObject> stored = new java.util.concurrent.ConcurrentHashMap<>();
+
+    @BeforeMethod
+    public void isolateOutbox() throws IOException {
+        outbox = Files.createTempDirectory("helios-sender-test");
+        System.setProperty("helios.outbox.directory", outbox.toString());
+    }
+
 
     /** One recorded request: path, ingest-key header and parsed JSON body. */
     private static final class Call {
@@ -74,6 +86,11 @@ public class HeliosSinkTest {
             server = null;
         }
         calls.clear();
+        stored.clear();
+        rejectOnce = false;
+        omitMiddleOnce = false;
+        System.clearProperty("helios.outbox.directory");
+        System.clearProperty("helios.bufferMiB");
     }
 
     private String startStubServer() throws IOException {
@@ -92,17 +109,41 @@ public class HeliosSinkTest {
         String path = exchange.getRequestURI().getPath();
         calls.add(new Call(path, exchange.getRequestHeaders().getFirst(HeliosSink.KEY_HEADER), body));
 
-        if (path.endsWith("/end")) {
-            exchange.sendResponseHeaders(204, -1);
+        JSONObject request = new JSONObject(body);
+        int status = 200;
+        String response;
+        if (rejectOnce && path.endsWith("/entries")) {
+            rejectOnce = false;
+            exchange.getResponseHeaders().add("Retry-After", "1");
+            exchange.sendResponseHeaders(503, -1);
             exchange.close();
             return;
         }
-        String response = path.endsWith("/entries")
-                ? new JSONObject().put("accepted", 1).put("duplicates", 0).put("nextOrdinal", calls.size()).toString()
-                : new JSONObject().put("sessionId", SESSION_ID).put("executionId", "exec").toString();
+        if (path.endsWith("/end")) {
+            int expected = request.getInt("expectedEntries");
+            if (stored.size() != expected) {
+                status = 409;
+                response = new JSONObject().put("code", "missingEntries").put("storedEntries", stored.size()).toString();
+            } else {
+                response = new JSONObject().put("complete", true).put("storedEntries", expected).toString();
+            }
+        } else if (path.endsWith("/entries")) {
+            int first = request.getInt("firstOrdinal");
+            JSONArray entries = request.getJSONArray("entries");
+            int duplicates = 0;
+            for (int i = 0; i < entries.length(); i++) {
+                if (omitMiddleOnce && first + i == 9) continue;
+                if (stored.putIfAbsent(first + i, entries.getJSONObject(i)) != null) duplicates++;
+            }
+            omitMiddleOnce = false;
+            response = new JSONObject().put("accepted", entries.length() - duplicates)
+                    .put("duplicates", duplicates).put("nextOrdinal", first + entries.length()).toString();
+        } else {
+            response = new JSONObject().put("sessionId", SESSION_ID).put("executionId", "exec").toString();
+        }
         byte[] bytes = response.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().add("Content-Type", "application/json");
-        exchange.sendResponseHeaders(200, bytes.length);
+        exchange.sendResponseHeaders(status, bytes.length);
         try (OutputStream out = exchange.getResponseBody()) {
             out.write(bytes);
         }
@@ -173,21 +214,21 @@ public class HeliosSinkTest {
                 "the master Task Bot travels next to the bot URI");
 
         List<Call> entries = callsEndingWith("/entries");
-        Assert.assertEquals(entries.size(), 3, "one request per entry");
-        for (int index = 0; index < entries.size(); index++) {
-            Call call = entries.get(index);
-            Assert.assertEquals(call.path, "/api/ingest/sessions/" + SESSION_ID + "/entries");
-            Assert.assertEquals(call.key, KEY, "ingest key header on entries");
-            Assert.assertEquals(call.body.getLong("firstOrdinal"), index, "ordinals increment");
-            JSONArray array = call.body.getJSONArray("entries");
-            Assert.assertEquals(array.length(), 1);
-            JSONObject entry = array.getJSONObject(0);
+        Assert.assertEquals(entries.size(), 1, "three entries share one request");
+        Call batch = entries.get(0);
+        Assert.assertEquals(batch.path, "/api/ingest/sessions/" + SESSION_ID + "/entries");
+        Assert.assertEquals(batch.key, KEY);
+        Assert.assertEquals(batch.body.getInt("firstOrdinal"), 0);
+        JSONArray array = batch.body.getJSONArray("entries");
+        Assert.assertEquals(array.length(), 3);
+        for (int index = 0; index < array.length(); index++) {
+            JSONObject entry = array.getJSONObject(index);
             Assert.assertEquals(entry.length(), 11);
             Assert.assertEquals(entry.getString("task"), "My Task");
             Assert.assertEquals(entry.getString("machine"), CustomHTMLLayout.machineName());
         }
-        Assert.assertEquals(entries.get(0).body.getJSONArray("entries").getJSONObject(0).getString("level"), "INFO");
-        Assert.assertEquals(entries.get(2).body.getJSONArray("entries").getJSONObject(0).getString("level"), "ERROR");
+        Assert.assertEquals(array.getJSONObject(0).getString("level"), "INFO");
+        Assert.assertEquals(array.getJSONObject(2).getString("level"), "ERROR");
 
         List<Call> ends = callsEndingWith("/end");
         Assert.assertEquals(ends.size(), 1, "one end call");
@@ -251,7 +292,7 @@ public class HeliosSinkTest {
         // Three logged rows plus the single WARN row explaining that streaming is off.
         Assert.assertEquals(countRows(logFile), 4, "HTML log still holds every row");
         String html = new String(Files.readAllBytes(logFile), StandardCharsets.UTF_8);
-        Assert.assertTrue(html.contains("Helios Cloud streaming is disabled for this session"),
+        Assert.assertTrue(html.contains("Helios delivery is pending"),
                 "one warning row explains why nothing was streamed");
     }
 
@@ -269,9 +310,53 @@ public class HeliosSinkTest {
         logThreeRows(session);
         session.close();
 
-        Assert.assertEquals(callsEndingWith("/entries").size(), 3, "every level reaches Helios");
+        Assert.assertEquals(callsEndingWith("/entries").get(0).body.getJSONArray("entries").length(), 3, "every level reaches Helios");
         Assert.assertEquals(countRows(Paths.get(paths.get(org.apache.logging.log4j.Level.INFO))), 1);
         Assert.assertEquals(countRows(Paths.get(paths.get(org.apache.logging.log4j.Level.ERROR))), 1);
+    }
+
+    @Test
+    public void overloadRetriesTheSameBatchAndClosingRepairsAMiddleGap() throws Exception {
+        String baseUrl = startStubServer();
+        rejectOnce = true;
+        omitMiddleOnce = true;
+        Path logFile = newLogFile();
+        CustomLogger session = new CustomLogger("CustomLogger_" + UUID.randomUUID(), logFile.toString(),
+                1000, 0, new HashSet<>(), EncodingMode.FAST, config(baseUrl));
+        for (int index = 0; index < 20; index++) session.getLogger().info(row("row " + index));
+        session.close();
+        Assert.assertEquals(stored.size(), 20);
+        Assert.assertEquals(stored.get(9).getString("message"), "row 9");
+        List<Call> batches = callsEndingWith("/entries");
+        Assert.assertEquals(batches.size(), 3, "rejection, partial storage, then gap repair");
+        Assert.assertEquals(batches.get(0).body.toString(), batches.get(2).body.toString(),
+                "retry preserves every ordinal, value and timestamp");
+        Assert.assertEquals(callsEndingWith("/end").size(), 2);
+        try (java.util.stream.Stream<Path> paths = Files.walk(outbox)) {
+            Assert.assertFalse(paths.anyMatch(path -> path.toString().endsWith(".helios-journal")),
+                    "delete only after the verified close");
+        }
+    }
+
+    @Test
+    public void fullBufferPreservesHtmlAndCannotReportCompleteDelivery() throws Exception {
+        System.setProperty("helios.bufferMiB", "1");
+        String baseUrl = startStubServer();
+        Path logFile = newLogFile();
+        CustomLogger session = new CustomLogger("CustomLogger_" + UUID.randomUUID(), logFile.toString(),
+                1000, 0, new HashSet<>(), EncodingMode.FAST, config(baseUrl));
+        session.getLogger().info(row("x".repeat(1024 * 1024)));
+        session.getLogger().info(row("still running"));
+        session.close();
+        Assert.assertEquals(countRows(logFile), 3, "both bot entries and the disk warning stay in HTML");
+        Assert.assertTrue(Files.readString(logFile).contains("Cloud logs are incomplete"));
+        Assert.assertEquals(stored.size(), 1);
+        Assert.assertEquals(stored.get(1).getString("message"), "still running");
+        Assert.assertTrue(callsEndingWith("/end").stream().allMatch(call -> call.body.getInt("expectedEntries") == 2));
+        try (java.util.stream.Stream<Path> files = Files.walk(outbox)) {
+            Assert.assertTrue(files.anyMatch(path -> path.toString().endsWith(".helios-journal")),
+                    "unverified records remain on disk");
+        }
     }
 
     @Test

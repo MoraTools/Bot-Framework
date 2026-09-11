@@ -1,8 +1,7 @@
 package com.automationanywhere.botcommand.utilities.logger;
 
 import com.automationanywhere.botcommand.utilities.helios.HeliosConfig;
-import com.automationanywhere.botcommand.utilities.helios.HeliosJsonLayout;
-import com.automationanywhere.botcommand.utilities.helios.HeliosSink;
+import com.automationanywhere.botcommand.utilities.helios.HeliosAppender;
 import com.automationanywhere.botcommand.utilities.screen.recorder.EncodingMode;
 import com.automationanywhere.botcommand.utilities.screen.recorder.ScreenRecorder;
 import com.automationanywhere.toolchain.runtime.session.CloseableSessionObject;
@@ -43,7 +42,7 @@ public class CustomLogger implements CloseableSessionObject {
     private final ScreenRecorder recorder;
 
     /** Non-null only while Helios Cloud streaming is enabled for this session. */
-    private HeliosSink heliosSink;
+    private HeliosAppender heliosAppender;
 
     // Constructor for a single log file for all levels (no video recording)
     public CustomLogger(String loggerName, String logFilePath, int maxLogEntries) throws IOException {
@@ -103,10 +102,6 @@ public class CustomLogger implements CloseableSessionObject {
 
         LoggerComponentBuilder loggerBuilder = builder.newLogger(loggerName, Level.INFO)
                 .add(builder.newAppenderRef("COMBINED_" + loggerId));
-        String heliosRef = addHeliosAppenders(builder, heliosConfig);
-        if (heliosRef != null) {
-            loggerBuilder.add(builder.newAppenderRef(heliosRef));
-        }
         builder.add(loggerBuilder);
 
         builder.add(builder.newRootLogger(Level.INFO));
@@ -123,8 +118,12 @@ public class CustomLogger implements CloseableSessionObject {
 
         // Get logger from the new context
         this.logger = context.getLogger(loggerName);
-        if (heliosSink != null) {
-            heliosSink.attachLogger(this.logger);
+        if (heliosConfig != null) {
+            heliosAppender = new HeliosAppender("HELIOS_" + loggerId, heliosConfig, this.logger);
+            heliosAppender.start();
+            config.addAppender(heliosAppender);
+            config.getLoggerConfig(loggerName).addAppender(heliosAppender, Level.INFO, heliosAppender.getFilter());
+            context.updateLoggers();
         }
 
         // Optionally start the screen recorder. Returns DISABLED on any failure.
@@ -187,53 +186,6 @@ public class CustomLogger implements CloseableSessionObject {
                 .addComponent(builder.newComponent("DefaultRolloverStrategy")
                     .addAttribute("fileIndex", "nomax")
             );
-    }
-
-    /**
-     * Opens the remote Helios Cloud session and wires an Async -> Http appender pair that
-     * streams every entry of this session to it.
-     *
-     * <p>Called while the configuration is still being built, because the entries URL embeds
-     * the server-assigned session id. When the remote session cannot be opened, nothing is
-     * added: the HTML log keeps working and {@link HeliosSink} writes one WARN row into it.
-     *
-     * @return the appender name the session logger must reference, or {@code null} when
-     *         streaming is off or unavailable
-     */
-    private String addHeliosAppenders(ConfigurationBuilder<BuiltConfiguration> builder, HeliosConfig heliosConfig) {
-        if (heliosConfig == null) {
-            return null;
-        }
-        this.heliosSink = new HeliosSink(heliosConfig);
-        if (heliosSink.startSession() == null) {
-            return null;
-        }
-
-        String httpName = "HELIOS_HTTP_" + loggerId;
-        String asyncName = "HELIOS_" + loggerId;
-
-        builder.add(builder.newAppender(httpName, "Http")
-                .addAttribute("url", heliosSink.entriesUrl())
-                .addAttribute("connectTimeoutMillis", 10000)
-                .addAttribute("readTimeoutMillis", 10000)
-                .addAttribute("ignoreExceptions", true)
-                .addComponent(builder.newComponent("Property")
-                        .addAttribute("name", HeliosSink.KEY_HEADER)
-                        .addAttribute("value", heliosConfig.ingestKey))
-                .addComponent(builder.newLayout("HeliosJsonLayout")
-                        .addAttribute("charset", "UTF-8")
-                        .addAttribute("sessionKey", loggerId)));
-
-        // Async so a slow or dead server never blocks the bot; non-blocking so a full buffer
-        // drops entries instead of stalling the caller.
-        builder.add(builder.newAppender(asyncName, "Async")
-                .addAttribute("bufferSize", 1024)
-                .addAttribute("blocking", false)
-                .addAttribute("ignoreExceptions", true)
-                .addAttribute("shutdownTimeout", 5000)
-                .addComponent(builder.newAppenderRef(httpName)));
-
-        return asyncName;
     }
 
     /**
@@ -369,10 +321,6 @@ public class CustomLogger implements CloseableSessionObject {
                 .add(builder.newAppenderRef(Level.INFO.name() + "_" + loggerId))
                 .add(builder.newAppenderRef(Level.WARN.name() + "_" + loggerId))
                 .add(builder.newAppenderRef(Level.ERROR.name() + "_" + loggerId));
-        String heliosRef = addHeliosAppenders(builder, heliosConfig);
-        if (heliosRef != null) {
-            loggerBuilder.add(builder.newAppenderRef(heliosRef));
-        }
         builder.add(loggerBuilder);
 
         builder.add(builder.newRootLogger(Level.INFO));
@@ -390,8 +338,12 @@ public class CustomLogger implements CloseableSessionObject {
 
         // Get logger from the new context
         this.logger = context.getLogger(loggerName);
-        if (heliosSink != null) {
-            heliosSink.attachLogger(this.logger);
+        if (heliosConfig != null) {
+            heliosAppender = new HeliosAppender("HELIOS_" + loggerId, heliosConfig, this.logger);
+            heliosAppender.start();
+            config.addAppender(heliosAppender);
+            config.getLoggerConfig(loggerName).addAppender(heliosAppender, Level.INFO, heliosAppender.getFilter());
+            context.updateLoggers();
         }
 
         // Optionally start the screen recorder. Recording artifacts (clips/, screenshots/posters)
@@ -429,13 +381,9 @@ public class CustomLogger implements CloseableSessionObject {
     @Override
     public synchronized void close() {
         if (!isClosed()) {
-            // Shutdown this specific logger context. This also drains the async Helios
-            // appender, so every streamed entry lands before the session is ended below.
+            // Freeze remote capture and check delivery while HTML logging can still record a warning.
+            if (heliosAppender != null) heliosAppender.finish();
             loggerContext.stop();
-
-            if (heliosSink != null) {
-                heliosSink.endSession(HeliosJsonLayout.consumeStatus(loggerId));
-            }
 
             // Stop the screen recorder (if any). Order matters within the recorder: stage-1
             // stops writing to the ring before pending stage-2 encodes drain, and the

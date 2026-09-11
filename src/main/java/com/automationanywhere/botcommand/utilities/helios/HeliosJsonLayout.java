@@ -30,12 +30,12 @@ import java.util.regex.Pattern;
  * Serializes one log event into the Helios Cloud entries envelope.
  *
  * <p>Reads the same {@code CustomHTMLLayout.Columns} map that the HTML layout reads, so a
- * streamed row and an HTML row always describe the same event. The Log4j2 {@code Http}
- * appender posts one event per request, so each envelope carries a single entry and its own
- * {@code firstOrdinal} taken from a per-layout counter.
+ * streamed row and an HTML row always describe the same event. The disk appender snapshots
+ * this envelope on the caller thread, before mutable bot variables can change. The sender
+ * later combines consecutive envelopes into HTTP batches.
  *
- * <p>The layout also tracks the worst level it has seen. {@code CustomLogger} reads that back
- * through {@link #consumeStatus(String)} on close to decide the session outcome.
+ * <p>The layout also tracks the worst level it has seen. The disk appender reads {@link #status()}
+ * on close to decide the session outcome.
  *
  * @author jamir-boop
  */
@@ -79,7 +79,11 @@ public class HeliosJsonLayout extends AbstractStringLayout {
      */
     public static String consumeStatus(String sessionKey) {
         HeliosJsonLayout layout = REGISTRY.remove(sessionKey);
-        Level level = layout == null ? Level.INFO : layout.worst.get();
+        return layout == null ? "OK" : layout.status();
+    }
+
+    public String status() {
+        Level level = worst.get();
         if (Level.ERROR.equals(level)) {
             return "ERROR";
         }

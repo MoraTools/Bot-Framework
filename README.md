@@ -1,6 +1,6 @@
 # A360 Bot Framework Package
 
-**Version 4.2.0** - maintained by **jamir-boop**, forked from the original A360 Tools package.
+**Version 4.3.0** - maintained by **jamir-boop**, forked from the original A360 Tools package.
 
 ## Overview
 Designed to streamline bot development, enhance logging, and facilitate comprehensive documentation within tasks for A360. Tailored for efficiency, consistency, and ease of use, this package addresses common challenges in bot development and maintenance, making it an indispensable tool for modern automation projects.
@@ -98,8 +98,8 @@ Every logger session can optionally stream its entries live to a Helios Cloud se
 | Call | Payload |
 |---|---|
 | `POST {url}/api/ingest/sessions` | Execution id, bot URI, master Task Bot URI (empty when the logger runs in the master), Control Room file id, machine, user, local start time, UTC offset in minutes. |
-| `POST {url}/api/ingest/sessions/{id}/entries` | One envelope per entry: ordinal plus timestamp, UTC offset, level, source, task, machine, user, message, variable count, the logged variables and screenshot/clip path - the same values the HTML row shows. |
-| `POST {url}/api/ingest/sessions/{id}/end` | Sent by `Stop Logger Session` with `status` = the worst level logged (`ERROR`, `WARN` or `OK`). |
+| `POST {url}/api/ingest/sessions/{id}/entries` | A batch of entries: first ordinal plus timestamp, UTC offset, level, source, task, machine, user, message, variable count, the logged variables and screenshot/clip path - the same values the HTML row shows. |
+| `POST {url}/api/ingest/sessions/{id}/end` | Sent by `Stop Logger Session` with `status` = the worst level logged (`ERROR`, `WARN` or `OK`) and `expectedEntries` for delivery verification. |
 
 The ingest key travels in the `X-Helios-Ingest-Key` header. Screenshots and video clips stay on the runner; only their paths are sent.
 
@@ -107,7 +107,15 @@ The variables logged with an entry are streamed with it, each as a name, a type 
 
 ### Failure behaviour
 
-Streaming never fails the bot. When the server is unreachable, the session start is rejected, or the key is wrong, the action writes exactly one WARN row into the HTML log stating that streaming is off for the session and the bot continues. Entries are queued in a bounded non-blocking buffer, so a slow or dead server drops streamed entries rather than holding the bot up, and the HTML log is always complete.
+Streaming never fails the bot. Each entry is numbered and copied to a UTF-8 disk journal before network delivery. The background sender batches up to 50 entries or 256 KiB, or flushes after 2 seconds. A larger single entry travels alone, subject to the server's 5 MiB request limit. Timeouts, HTTP 408/429 and server errors use retries with backoff and `Retry-After`; retries preserve the original ordinals and payloads.
+
+`Stop Logger Session` saves the expected entry count and waits up to 5 seconds for delivery, plus up to 1 second to stop the sender. Helios verifies the complete sequence before confirming delivery. A missing entry triggers replay; duplicate ordinals are ignored. The journal is deleted only after an explicit verified receipt. Pending journals retry at a later logger startup under the same operating-system user, Helios URL and ingest key. A crash without a closing record permits replay of saved entries, but cannot prove that the complete session was captured. A truncated journal is retained for inspection.
+
+Journals live in `<user.home>/.helios/outbox/`, separate from HTML retention. They contain log data, including logged variable values, but no ingest keys. A journal retains all entries until final verification, including entries already acknowledged during the run. Key changes use a separate directory; pending journals under an old key need operator attention.
+
+The default limit is **256 MiB per session**. To raise it to 1 GiB, set the runner environment variable `HELIOS_BUFFER_MIB=1024` and restart the Bot Agent so new sessions inherit it. Values from 1 to 65536 MiB are supported. The Java system property `helios.bufferMiB` takes precedence; `helios.outbox.directory` can override the root directory. Each concurrent or pending session has its own limit, so total disk use can exceed one session's limit. There is no automatic deletion of unverified journals.
+
+If the journal reaches its limit or a disk write fails, buffered entries are preserved and HTML logging continues. A local warning marks cloud logs as incomplete; the expected count still includes entries that could not be saved. Network requests never block individual log calls, but each call does perform a local disk write. Delivery warnings are local HTML diagnostics and are not themselves streamed.
 
 ## Bundled FFmpeg
 
