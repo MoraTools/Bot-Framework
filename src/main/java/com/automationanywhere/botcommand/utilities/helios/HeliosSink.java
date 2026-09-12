@@ -4,6 +4,8 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.IOException;
+import java.io.InvalidObjectException;
+import java.nio.file.NoSuchFileException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -99,7 +101,8 @@ public final class HeliosSink {
                 if (previous == null) {
                     while (!recovery.isEmpty() && previous == null) {
                         try { previous = new Delivery(new HeliosJournal(recovery.removeFirst(), null)); }
-                        catch (java.nio.channels.OverlappingFileLockException busy) { /* another logger owns it */ }
+                        catch (java.nio.channels.OverlappingFileLockException | HeliosJournal.BusyException
+                                | NoSuchFileException unavailable) { /* owned or already delivered by another sender */ }
                         catch (IOException | RuntimeException error) {
                             warning.accept("An older journal could not be opened; it was retained.");
                         }
@@ -131,6 +134,8 @@ public final class HeliosSink {
         long firstPendingAt;
         int failures;
         boolean refused;
+        boolean replayed;
+        int batchEntries = HeliosJournal.BATCH_ENTRIES;
         JSONObject pending;
 
         Delivery(HeliosJournal journal) { this.journal = journal; }
@@ -142,7 +147,7 @@ public final class HeliosSink {
                     JSONObject response = new JSONObject(post("/api/ingest/sessions", journal.start));
                     sessionId = UUID.fromString(response.getString("sessionId")).toString();
                 }
-                JSONObject body = pending == null ? journal.next() : pending;
+                JSONObject body = pending == null ? journal.next(batchEntries) : pending;
                 if (body == null) {
                     // No closing record means a previous run crashed. Upload its available rows,
                     // but never invent a verified close for that run.
@@ -152,7 +157,7 @@ public final class HeliosSink {
                 if (body.has("entries")) {
                     JSONArray entries = body.getJSONArray("entries");
                     if (firstPendingAt == 0) firstPendingAt = System.nanoTime();
-                    if (!flush && !body.optBoolean("journalFull") && entries.length() < HeliosJournal.BATCH_ENTRIES
+                    if (!flush && !body.optBoolean("journalFull") && entries.length() < batchEntries
                             && body.toString().getBytes(StandardCharsets.UTF_8).length < HeliosJournal.BATCH_BYTES
                             && System.nanoTime() - firstPendingAt < 2_000_000_000L) return false;
                     pending = body;
@@ -186,7 +191,27 @@ public final class HeliosSink {
                 }
                 failures = 0;
             } catch (ResponseError error) {
+                if (error.status == 413 && pending != null) {
+                    int count = pending.getJSONArray("entries").length();
+                    if (count > 1) {
+                        batchEntries = Math.max(1, count / 2);
+                    } else {
+                        // Advance delivery only: keep the rejected record in the journal for later recovery.
+                        journal.acknowledge(pending.getLong("journalOffset"));
+                        batchEntries = HeliosJournal.BATCH_ENTRIES;
+                        warning.accept("An oversized entry was retained on disk. Later entries will still be sent.");
+                    }
+                    pending = null;
+                    firstPendingAt = 0;
+                    return false;
+                }
                 if (error.status == 409 && error.missingEntries) {
+                    if (replayed) {
+                        refused = true;
+                        warning.accept("Delivery is incomplete after replay; the journal was retained for inspection.");
+                        return false;
+                    }
+                    replayed = true;
                     journal.rewind();
                     pending = null;
                 }
@@ -196,6 +221,9 @@ public final class HeliosSink {
                     return false;
                 }
                 delay(error.retryMillis);
+            } catch (InvalidObjectException corrupt) {
+                refused = true;
+                warning.accept("A damaged journal was retained after sending its complete records.");
             } catch (IOException | RuntimeException error) {
                 delay(0);
             }

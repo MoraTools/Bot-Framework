@@ -59,11 +59,32 @@ public class HeliosJournalTest {
                 JSONObject batch = journal.next();
                 journal.acknowledge(batch.getLong("journalOffset"));
             }
-            Assert.expectThrows(java.io.IOException.class, journal::next);
+            JSONObject savedPrefix = journal.next();
+            Assert.assertEquals(savedPrefix.getInt("firstOrdinal"), 3);
+            journal.acknowledge(savedPrefix.getLong("journalOffset"));
+            Assert.expectThrows(java.io.InvalidObjectException.class, journal::next);
         }
         Assert.assertTrue(Files.exists(path), "a torn record must never be treated as verified");
         Files.delete(path);
         Files.delete(path.getParent());
+    }
+
+    @Test
+    public void recoveryNeverRecreatesADeletedJournal() throws Exception {
+        Path directory = Files.createTempDirectory("helios-deleted-test");
+        Path missing = directory.resolve("deleted.helios-journal");
+        Assert.expectThrows(java.nio.file.NoSuchFileException.class, () -> new HeliosJournal(missing, null));
+        Assert.assertFalse(Files.exists(missing));
+        Files.delete(directory);
+    }
+
+    /** Separate-process lock holder used by the recovery test on Linux and Windows. */
+    public static void main(String[] args) throws Exception {
+        try (HeliosJournal journal = new HeliosJournal(Path.of(args[0]), null)) {
+            System.out.println("locked");
+            System.out.flush();
+            System.in.read();
+        }
     }
 
     @Test

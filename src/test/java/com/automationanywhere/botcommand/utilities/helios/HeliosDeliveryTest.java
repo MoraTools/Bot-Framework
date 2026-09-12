@@ -74,6 +74,104 @@ public class HeliosDeliveryTest {
         }
     }
 
+    @Test
+    public void incompleteAndDamagedJournalsDoNotBlockLaterRecovery() throws Exception {
+        try (Server server = new Server()) {
+            Path root = Files.createTempDirectory("helios-recovery-gaps");
+            Path gap = seed(root, server.config("gap"), "a", 2, false);
+            Path torn = seed(root, server.config("torn"), "b", 1, true);
+            Path healthy = seed(root, server.config("healthy"), "c", 1, false);
+            HeliosSink sink = new HeliosSink(server.config("current"), root, ignored -> { });
+            try {
+                await(() -> server.verified.contains("healthy"));
+                Assert.assertEquals(server.ends.get("gap").intValue(), 2, "only one full repair pass");
+                String tornId = UUID.nameUUIDFromBytes("torn".getBytes(StandardCharsets.UTF_8)).toString();
+                Assert.assertTrue(server.rows.containsKey(tornId + ":0"), "saved prefix must reach Helios");
+                Assert.assertFalse(server.verified.contains("gap"));
+                Assert.assertFalse(server.verified.contains("torn"));
+                Assert.assertTrue(Files.exists(gap));
+                Assert.assertTrue(Files.exists(torn));
+                Assert.assertFalse(Files.exists(healthy));
+            } finally { Assert.assertTrue(sink.finish("OK", 0)); }
+        }
+    }
+
+    @Test
+    public void oversizedEntryDoesNotBlockFollowingValidEntries() throws Exception {
+        try (Server server = new Server()) {
+            server.maxRequestBytes = 256;
+            Path root = Files.createTempDirectory("helios-oversized");
+            HeliosSink sink = new HeliosSink(server.config("large"), root, ignored -> { });
+            JSONObject large = entry(0);
+            large.getJSONArray("entries").getJSONObject(0).put("message", "x".repeat(1024));
+            sink.append(large);
+            sink.append(entry(1));
+            Assert.assertFalse(sink.finish("OK", 2));
+            String id = UUID.nameUUIDFromBytes("large".getBytes(StandardCharsets.UTF_8)).toString();
+            Assert.assertEquals(server.rows.get(id + ":1").getString("message"), "entry 1");
+            Assert.assertFalse(server.verified.contains("large"));
+            try (java.util.stream.Stream<Path> files = Files.walk(root)) {
+                Assert.assertTrue(files.anyMatch(path -> path.toString().endsWith(".helios-journal")));
+            }
+        }
+    }
+
+    @Test
+    public void rejectedMultiEntryBatchesCanSplitWithoutLosingEntries() throws Exception {
+        try (Server server = new Server()) {
+            server.maxRequestBytes = entry(0).toString().getBytes(StandardCharsets.UTF_8).length;
+            HeliosSink sink = new HeliosSink(server.config("split"),
+                    Files.createTempDirectory("helios-split"), ignored -> { });
+            sink.append(entry(0));
+            sink.append(entry(1));
+            Assert.assertTrue(sink.finish("OK", 2));
+            Assert.assertEquals(server.rows.size(), 2);
+        }
+    }
+
+    @Test
+    public void aJournalLockedByAnotherProcessDoesNotEmitAWarning() throws Exception {
+        try (Server server = new Server()) {
+            Path root = Files.createTempDirectory("helios-other-process");
+            Path held = seed(root, server.config("held"), "a", 1, false);
+            String javaExecutable = Path.of(System.getProperty("java.home"), "bin",
+                    System.getProperty("os.name").startsWith("Windows") ? "java.exe" : "java").toString();
+            java.util.List<String> classpath = new java.util.ArrayList<>();
+            for (Class<?> type : new Class<?>[] { HeliosJournalTest.class, HeliosJournal.class, JSONObject.class, Assert.class })
+                classpath.add(Path.of(type.getProtectionDomain().getCodeSource().getLocation().toURI()).toString());
+            Process child = new ProcessBuilder(javaExecutable, "-cp", String.join(java.io.File.pathSeparator, classpath),
+                    HeliosJournalTest.class.getName(), held.toString()).redirectError(ProcessBuilder.Redirect.INHERIT).start();
+            try {
+                java.io.BufferedReader output = new java.io.BufferedReader(new java.io.InputStreamReader(child.getInputStream()));
+                Assert.assertEquals(output.readLine(), "locked");
+                java.util.List<String> warnings = new CopyOnWriteArrayList<>();
+                HeliosSink sink = new HeliosSink(server.config("current"), root, warnings::add);
+                Assert.assertTrue(sink.finish("OK", 0));
+                Assert.assertTrue(warnings.isEmpty(), warnings.toString());
+                Assert.assertTrue(Files.exists(held));
+            } finally {
+                child.getOutputStream().close();
+                if (!child.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) child.destroyForcibly();
+            }
+        }
+    }
+
+    private static Path seed(Path root, HeliosConfig config, String name, int expected, boolean torn) throws Exception {
+        byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest((config.baseUrl + "\0" + config.ingestKey).getBytes(StandardCharsets.UTF_8));
+        StringBuilder hash = new StringBuilder();
+        for (byte value : digest) hash.append(String.format("%02x", value));
+        Path directory = root.resolve(hash.toString());
+        Files.createDirectories(directory);
+        Path path = directory.resolve(name + ".helios-journal");
+        try (HeliosJournal journal = new HeliosJournal(path, new JSONObject().put("executionId", config.executionId))) {
+            journal.append(entry(0));
+            if (!torn) journal.append(new JSONObject().put("status", "OK").put("expectedEntries", expected));
+        }
+        if (torn) Files.writeString(path, "{partial", java.nio.file.StandardOpenOption.APPEND);
+        return path;
+    }
+
     private static JSONObject entry(int index) {
         return new JSONObject().put("firstOrdinal", index).put("entries", new JSONArray()
                 .put(new JSONObject().put("message", "entry " + index).put("timestamp", "original " + index)));
@@ -87,6 +185,8 @@ public class HeliosDeliveryTest {
 
     private static final class Server implements AutoCloseable {
         final HttpServer server = HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        volatile int maxRequestBytes = Integer.MAX_VALUE;
+        final Map<String, Integer> ends = new ConcurrentHashMap<>();
         final AtomicBoolean busy = new AtomicBoolean();
         final AtomicBoolean loseResponse = new AtomicBoolean();
         final AtomicBoolean omitMiddle = new AtomicBoolean();
@@ -110,6 +210,11 @@ public class HeliosDeliveryTest {
                     String id = path.split("/")[4];
                     if (path.endsWith("/entries")) {
                         bodies.add(body.toString());
+                        if (body.toString().getBytes(StandardCharsets.UTF_8).length > maxRequestBytes) {
+                            exchange.sendResponseHeaders(413, -1);
+                            exchange.close();
+                            return;
+                        }
                         if (busy.get()) {
                             exchange.getResponseHeaders().set("Retry-After", "60");
                             exchange.sendResponseHeaders(503, -1);
@@ -128,6 +233,7 @@ public class HeliosDeliveryTest {
                             return;
                         }
                     } else {
+                        ends.merge(executions.get(id), 1, Integer::sum);
                         int expected = body.getInt("expectedEntries");
                         long count = rows.keySet().stream().filter(key -> key.startsWith(id + ":")).count();
                         if (count == expected) {

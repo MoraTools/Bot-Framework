@@ -1,6 +1,6 @@
 # A360 Bot Framework Package
 
-**Version 4.3.0** - maintained by **jamir-boop**, forked from the original A360 Tools package.
+**Version 4.3.1** - maintained by **jamir-boop**, forked from the original A360 Tools package.
 
 ## Overview
 Designed to streamline bot development, enhance logging, and facilitate comprehensive documentation within tasks for A360. Tailored for efficiency, consistency, and ease of use, this package addresses common challenges in bot development and maintenance, making it an indispensable tool for modern automation projects.
@@ -107,13 +107,13 @@ The variables logged with an entry are streamed with it, each as a name, a type 
 
 ### Failure behaviour
 
-Streaming never fails the bot. Each entry is numbered and copied to a UTF-8 disk journal before network delivery. The background sender batches up to 50 entries or 256 KiB, or flushes after 2 seconds. A larger single entry travels alone, subject to the server's 5 MiB request limit. Timeouts, HTTP 408/429 and server errors use retries with backoff and `Retry-After`; retries preserve the original ordinals and payloads.
+Streaming never fails the bot. Each entry is numbered and copied to a UTF-8 disk journal before network delivery. The background sender batches up to 50 entries or 256 KiB, or flushes after 2 seconds. A larger single entry travels alone, subject to the server's 5 MiB request limit. HTTP 413 splits a rejected batch; an oversized single entry remains on disk while later valid entries continue to send. Timeouts, HTTP 408/429 and server errors use retries with backoff and `Retry-After`; retries preserve the original ordinals and payloads.
 
-`Stop Logger Session` saves the expected entry count and waits up to 5 seconds for delivery, plus up to 1 second to stop the sender. Helios verifies the complete sequence before confirming delivery. A missing entry triggers replay; duplicate ordinals are ignored. The journal is deleted only after an explicit verified receipt. Pending journals retry at a later logger startup under the same operating-system user, Helios URL and ingest key. A crash without a closing record permits replay of saved entries, but cannot prove that the complete session was captured. A truncated journal is retained for inspection.
+`Stop Logger Session` saves the expected entry count and waits up to 5 seconds for delivery, plus up to 1 second to stop the sender. Helios verifies the complete sequence before confirming delivery. A missing entry triggers one full repair pass; duplicate ordinals are ignored. If the sequence is still incomplete, the journal is retained and recovery moves on to other sessions. The journal is deleted only after an explicit verified receipt. Pending journals retry at a later logger startup under the same operating-system user, Helios URL and ingest key. A crash without a closing record permits replay of saved entries, but cannot prove that the complete session was captured. Complete records before a damaged or truncated tail are sent; the journal stays unverified and is retained for inspection.
 
 Journals live in `<user.home>/.helios/outbox/`, separate from HTML retention. They contain log data, including logged variable values, but no ingest keys. A journal retains all entries until final verification, including entries already acknowledged during the run. Key changes use a separate directory; pending journals under an old key need operator attention.
 
-The default limit is **256 MiB per session**. To raise it to 1 GiB, set the runner environment variable `HELIOS_BUFFER_MIB=1024` and restart the Bot Agent so new sessions inherit it. Values from 1 to 65536 MiB are supported. The Java system property `helios.bufferMiB` takes precedence; `helios.outbox.directory` can override the root directory. Each concurrent or pending session has its own limit, so total disk use can exceed one session's limit. There is no automatic deletion of unverified journals.
+The default limit is **256 MiB per session**. To raise it to 1 GiB, set the runner environment variable `HELIOS_BUFFER_MIB=1024` and restart the Bot Agent so new sessions inherit it. Values from 1 to 65536 MiB are supported. The Java system property `helios.bufferMiB` takes precedence; `helios.outbox.directory` can override the root directory. Each concurrent or pending session has its own limit, so total disk use can exceed one session's limit. There is no automatic deletion of unverified journals. Recovery skips files that another process has locked or already deleted without reporting a delivery failure.
 
 If the journal reaches its limit or a disk write fails, buffered entries are preserved and HTML logging continues. A local warning marks cloud logs as incomplete; the expected count still includes entries that could not be saved. Network requests never block individual log calls, but each call does perform a local disk write. Delivery warnings are local HTML diagnostics and are not themselves streamed.
 
