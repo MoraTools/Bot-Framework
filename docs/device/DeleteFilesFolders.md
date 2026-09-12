@@ -23,7 +23,7 @@ threshold, selection method, and skip patterns. The base folder itself is never 
 
 - **Type:** `Boolean`
 - **Default:** `true`
-- **Description:** When checked, processes all nested folders. When unchecked, only processes immediate folder contents.
+- **Description:** When checked, processes all nested folders. When unchecked, selects only immediate folder contents. Before removing a selected folder, all descendants are checked for age and skip rules; the whole folder is preserved if any descendant must be kept.
 
 ### Delete items older than
 

@@ -5,7 +5,6 @@ import com.automationanywhere.commandsdk.annotations.*;
 import com.automationanywhere.commandsdk.annotations.rules.*;
 import com.automationanywhere.commandsdk.model.AttributeType;
 import com.automationanywhere.commandsdk.model.DataType;
-import org.apache.commons.io.FileUtils;
 
 import java.io.IOException;
 import java.nio.file.*;
@@ -163,11 +162,11 @@ public class DeleteFilesFolders {
             // Phase 3: Execute deletions
             if (selectMethod.equalsIgnoreCase(PROCESS_ONLY_FILE_TYPE) ||
                     selectMethod.equalsIgnoreCase(PROCESS_ALL_TYPES)) {
-                delete(processor.getFilesToDelete(), unableToDeleteBehavior);
+                delete(processor.getFilesToDelete(), unableToDeleteBehavior, collector, false);
             }
 
             if (selectMethod.equalsIgnoreCase(PROCESS_ALL_TYPES)) {
-                delete(processor.getSortedDirectoriesToDelete(), unableToDeleteBehavior);
+                delete(processor.getSortedDirectoriesToDelete(), unableToDeleteBehavior, collector, !recursive);
             }
 
             LOGGER.info("Deletion process completed successfully");
@@ -199,11 +198,33 @@ public class DeleteFilesFolders {
         }
     }
 
-    private void delete(List<Path> pathsToDelete, String unableToDeleteBehavior) {
+    private void delete(List<Path> pathsToDelete, String unableToDeleteBehavior,
+                        FileCollector policy, boolean inspectTree) {
         for (Path path : pathsToDelete) {
             try {
+                BasicFileAttributes attrs = Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+                if (!attrs.isDirectory() && !policy.meetsDeletionCriteria(attrs)) continue;
+                if (attrs.isDirectory() && inspectTree) {
+                    if (!policy.meetsDeletionCriteria(attrs)) continue;
+                    FileCollector tree = new FileCollector(path, true, policy.thresholdCriteria,
+                            policy.deletionThresholdInstant, policy.skipFiles,
+                            policy.skipFiles ? policy.skipFilePattern.pattern() : "", policy.skipFolders,
+                            policy.skipFolders ? policy.skipFolderPattern.pattern() : "");
+                    Files.walkFileTree(path, tree);
+                    if (!tree.filesToSkip.isEmpty() || !tree.directoriesToSkip.isEmpty() || !tree.youngFiles.isEmpty())
+                        continue;
+                    delete(new ArrayList<>(tree.filesToDelete), unableToDeleteBehavior, policy, false);
+                    List<Path> directories = new ArrayList<>(tree.directoriesToDelete);
+                    directories.sort(Comparator.comparingInt(Path::getNameCount).reversed());
+                    delete(directories, unableToDeleteBehavior, policy, false);
+                }
+                // Never recursively wipe a directory: newly created or preserved children must survive.
                 LOGGER.info("Deleting: " + path);
-                FileUtils.forceDelete(path.toFile());
+                Files.deleteIfExists(path);
+            } catch (NoSuchFileException gone) {
+                // Another cleanup already removed this path.
+            } catch (DirectoryNotEmptyException preserved) {
+                LOGGER.info("Preserving non-empty directory: " + path);
             } catch (IOException e) {
                 LOGGER.warning("Failed to delete " + path + ": " + e.getMessage());
                 if (unableToDeleteBehavior.equalsIgnoreCase(ERROR_THROW)) {
@@ -270,6 +291,8 @@ public class DeleteFilesFolders {
             if (meetsDeletionCriteria(attrs)) {
                 LOGGER.info("Marking directory for potential deletion: " + dir);
                 directoriesToDelete.add(dir);
+            } else {
+                directoriesToSkip.add(dir);
             }
 
             // If not recursive, skip traversing into subdirectories after processing current directory
@@ -304,6 +327,7 @@ public class DeleteFilesFolders {
         @Override
         public FileVisitResult visitFileFailed(Path file, IOException exc) {
             LOGGER.warning("Failed to visit file: " + file + " - " + exc.getMessage());
+            filesToSkip.add(file);
             return FileVisitResult.CONTINUE;
         }
 

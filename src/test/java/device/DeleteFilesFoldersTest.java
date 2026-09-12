@@ -634,9 +634,8 @@ public class DeleteFilesFoldersTest {
                 THRESHOLD_UNIT_DAY, THRESHOLD_CRITERIA_CREATION,
                 false, "", false, "", ERROR_IGNORE);
 
-        // In non-recursive mode, old directories are deleted entirely (including young content)
-        // This is the current behavior - the directory age takes precedence
-        assertPathsDoNotExist("dir1", "dir1/nested_young.txt", "dir1/nested_old.txt");
+        // Non-recursive mode preserves a selected tree if any descendant must be kept.
+        assertPathsExist("dir1", "dir1/nested_young.txt", "dir1/nested_old.txt");
         assertPathsDoNotExist("dir2", "dir2/all_old.txt");
 
         // Young directory should remain

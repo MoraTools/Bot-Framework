@@ -1,6 +1,6 @@
 # A360 Bot Framework Package
 
-**Version 4.3.1** - maintained by **jamir-boop**, forked from the original A360 Tools package.
+**Version 4.3.2** - maintained by **jamir-boop**, forked from the original A360 Tools package.
 
 ## Overview
 Designed to streamline bot development, enhance logging, and facilitate comprehensive documentation within tasks for A360. Tailored for efficiency, consistency, and ease of use, this package addresses common challenges in bot development and maintenance, making it an indispensable tool for modern automation projects.

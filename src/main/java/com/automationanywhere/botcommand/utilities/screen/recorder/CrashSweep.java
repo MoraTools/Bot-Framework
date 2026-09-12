@@ -4,6 +4,10 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
+import java.nio.file.LinkOption;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
@@ -25,8 +29,10 @@ import java.util.stream.Stream;
  * <p>For each {@code sessions\<id>} folder under
  * {@code %LOCALAPPDATA%\A360-BotFramework\}:
  * <ol>
+ *   <li>Skip sessions with a live or unknown owner. Hold one sweep lock so another
+ *       JVM cannot remove work that is being salvaged.</li>
  *   <li>If the folder name ends in {@code .salvaging} (leftover from a prior
- *       interrupted sweep), delete it unconditionally.</li>
+ *       interrupted sweep), delete it only after those checks.</li>
  *   <li>Otherwise atomically rename it to {@code <id>.salvaging} to claim it.
  *       If the rename fails, another JVM has it - skip.</li>
  *   <li>If {@code session.active} exists in the claimed folder, salvage in
@@ -95,27 +101,28 @@ final class CrashSweep {
         if (!Files.isDirectory(sessionsRoot)) {
             return;
         }
-        try (Stream<Path> dirs = Files.list(sessionsRoot)) {
-            dirs.forEach(folder -> processOne(folder, appDataRoot, ffmpegExe));
+        // Keep the lock file: deleting it would let two processes lock different file instances.
+        try (FileChannel channel = FileChannel.open(sessionsRoot.resolve(".sweep.lock"),
+                StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+             FileLock lock = channel.tryLock()) {
+            if (lock == null) return;
+            try (Stream<Path> dirs = Files.list(sessionsRoot)) {
+                dirs.filter(folder -> Files.isDirectory(folder, LinkOption.NOFOLLOW_LINKS))
+                        .forEach(folder -> processOne(folder, appDataRoot, ffmpegExe));
+            }
+        } catch (OverlappingFileLockException busy) {
+            // Another sweep in this JVM owns the root.
         } catch (IOException e) {
             LOGGER.debug("Sweep listing failed at {}: {}", sessionsRoot, e.toString());
         }
     }
 
     private static void processOne(Path folder, Path appDataRoot, Path ffmpegExe) {
+        // Missing metadata is also protected: another bot may still be starting its recorder.
+        if (ownerMayBeRunning(folder)) return;
         String name = folder.getFileName().toString();
         if (name.endsWith(SALVAGING_SUFFIX)) {
             ScreenRecorder.deleteRecursivelyQuietly(folder);
-            return;
-        }
-        // Skip folders that belong to the running JVM. The sweep daemon races
-        // with sibling sessions starting up in the same JVM: without this
-        // guard the daemon could claim a freshly-created session folder
-        // before its constructor finishes writing markers and end up deleting
-        // a live session's ring/scratch dirs. If the meta is missing or
-        // unreadable, the folder is mid-construction or corrupt - either way
-        // skip and let the next JVM start handle it.
-        if (belongsToCurrentJvm(folder)) {
             return;
         }
         Path claimed = folder.resolveSibling(name + SALVAGING_SUFFIX);
@@ -138,14 +145,15 @@ final class CrashSweep {
         }
     }
 
-    private static boolean belongsToCurrentJvm(Path folder) {
+    private static boolean ownerMayBeRunning(Path folder) {
         Path metaFile = folder.resolve(SESSION_META);
         if (!Files.exists(metaFile)) {
             return true;
         }
         try {
             SessionMeta meta = SessionMeta.read(metaFile);
-            return meta.jvmPid == ProcessHandle.current().pid();
+            // Conservatively preserve reused PIDs too; a live process is never a deletion target.
+            return meta.jvmPid <= 0 || ProcessHandle.of(meta.jvmPid).map(ProcessHandle::isAlive).orElse(false);
         } catch (Exception e) {
             return true;
         }
