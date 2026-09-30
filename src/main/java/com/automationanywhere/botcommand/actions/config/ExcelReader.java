@@ -15,6 +15,7 @@ import org.apache.poi.ss.usermodel.*;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.io.Closeable;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -236,8 +237,8 @@ public class ExcelReader {
             throw new BotCommandException("Error reading Excel file: " + e.getMessage(), e);
         } finally {
             // Ensure resources are always closed properly
-            closeWorkbook(workbook);
-            closeInputStream(inputStream);
+            closeResource(workbook, "workbook");
+            closeResource(inputStream, "input stream");
         }
     }
 
@@ -263,23 +264,12 @@ public class ExcelReader {
         return columnIndex;
     }
 
-    // Helper methods for resource cleanup
-    private void closeWorkbook(Workbook workbook) {
-        if (workbook != null) {
+    private void closeResource(Closeable resource, String name) {
+        if (resource != null) {
             try {
-                workbook.close();
+                resource.close();
             } catch (IOException e) {
-                LOGGER.warn("Error closing workbook: {}", e.getMessage());
-            }
-        }
-    }
-
-    private void closeInputStream(FileInputStream inputStream) {
-        if (inputStream != null) {
-            try {
-                inputStream.close();
-            } catch (IOException e) {
-                LOGGER.warn("Error closing input stream: {}", e.getMessage());
+                LOGGER.warn("Error closing {}: {}", name, e.getMessage());
             }
         }
     }

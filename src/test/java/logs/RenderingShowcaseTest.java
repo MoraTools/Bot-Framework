@@ -14,6 +14,7 @@ import com.automationanywhere.botcommand.data.model.Schema;
 import com.automationanywhere.botcommand.data.model.table.Row;
 import com.automationanywhere.botcommand.data.model.table.Table;
 import com.automationanywhere.botcommand.utilities.logger.CustomLogger;
+import com.automationanywhere.botcommand.utilities.logger.HTMLGenerator;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
@@ -298,12 +299,8 @@ public class RenderingShowcaseTest {
 
         new StopLoggerSession().stop(customLogger);
 
-        String variablesDir = testPath + "variables";
-        File[] variableFiles = new File(variablesDir).listFiles((dir, name) -> name.endsWith(".html"));
-        Assert.assertNotNull(variableFiles, "Variables directory should contain files");
-        Assert.assertEquals(variableFiles.length, 1, "Exactly one variables file should be created");
-
-        String variablesHtml = new String(Files.readAllBytes(variableFiles[0].toPath()));
+        Assert.assertFalse(Files.exists(Paths.get(testPath, "variables")), "no variable sidecar files");
+        String variablesHtml = CompressedSnapshots.expand(Files.readString(Paths.get(logFilePath)));
         // Spot-check that representative variables, types, and rare characters survive
         Assert.assertTrue(variablesHtml.contains("Long URL"), "should include 'Long URL' name");
         Assert.assertTrue(variablesHtml.contains("JSON Multiline"), "should include 'JSON Multiline' name");
@@ -316,7 +313,7 @@ public class RenderingShowcaseTest {
         Assert.assertTrue(variablesHtml.contains("AAAAAAAAAAAAAAAAAAAAAAAAA"), "Unbreakable token should survive verbatim");
         Assert.assertTrue(variablesHtml.contains("ROW-030"), "Tall table should include all 30 rows");
 
-        System.out.println("Variables showcase artifact: " + variableFiles[0].getAbsolutePath());
+        System.out.println("Variables showcase artifact: " + logFilePath);
     }
 
     @Test
@@ -456,14 +453,14 @@ public class RenderingShowcaseTest {
         Assert.assertTrue(logFile.exists(), "Log file should exist");
         Assert.assertTrue(logFile.length() > 0, "Log file should have content");
 
-        String logHtml = new String(Files.readAllBytes(logFile.toPath()));
+        String logHtml = CompressedSnapshots.expand(new String(Files.readAllBytes(logFile.toPath())));
         // Verify all three levels rendered, screenshots and variables were emitted,
         // and HTML escaping happened where needed.
         Assert.assertTrue(logHtml.contains("level-INFO"), "INFO level should be rendered");
         Assert.assertTrue(logHtml.contains("level-WARN"), "WARN level should be rendered");
         Assert.assertTrue(logHtml.contains("level-ERROR"), "ERROR level should be rendered");
         Assert.assertTrue(logHtml.contains("class='img-link'"), "Screenshot links should be rendered");
-        Assert.assertTrue(logHtml.contains("vars-link"), "Variable links should be rendered");
+        Assert.assertTrue(logHtml.contains("class='entry-variables'"), "Inline variables should be rendered");
         Assert.assertTrue(logHtml.contains("&lt;input.csv&gt;"), "HTML special characters in messages must be escaped");
 
         File screenshotsDir = new File(testPath + "screenshots");
@@ -471,17 +468,16 @@ public class RenderingShowcaseTest {
         Assert.assertNotNull(screenshots, "Screenshots directory should exist");
         Assert.assertTrue(screenshots.length >= 4, "Should have captured screenshots for the entries that requested them");
 
-        File variablesDir = new File(testPath + "variables");
-        File[] variableFiles = variablesDir.listFiles((dir, name) -> name.endsWith(".html"));
-        Assert.assertNotNull(variableFiles, "Variables directory should exist");
-        Assert.assertTrue(variableFiles.length >= 4, "Should have generated variables files for entries that logged variables");
+        Assert.assertFalse(Files.exists(Paths.get(testPath, "variables")));
+        Assert.assertTrue(logHtml.split("<details class='entry-variables'>", -1).length - 1 >= 4,
+                "entries with variables have inline snapshots");
 
         System.out.println("Log showcase artifact: " + logFilePath);
     }
 
     @Test
     public void testWideTableVariableRendering() throws Exception {
-        // Stress-tests the variables.html template with a wide table containing
+        // Stress-tests the inline variable styles with a wide table containing
         // long cell values. Exercises every layer end-to-end: schema/row
         // construction, LogMessage.action with logVariable=YES,
         // HTMLGenerator.appendTableValue, and the rendered template.
@@ -593,12 +589,8 @@ public class RenderingShowcaseTest {
 
         new StopLoggerSession().stop(customLogger);
 
-        String variablesDir = testPath + "variables";
-        File[] variableFiles = new File(variablesDir).listFiles((dir, name) -> name.endsWith(".html"));
-        Assert.assertNotNull(variableFiles, "Variables directory should contain files");
-        Assert.assertEquals(variableFiles.length, 1, "Exactly one variables file should be created");
-
-        String variablesHtml = new String(Files.readAllBytes(variableFiles[0].toPath()));
+        Assert.assertFalse(Files.exists(Paths.get(testPath, "variables")), "no variable sidecar files");
+        String variablesHtml = CompressedSnapshots.expand(Files.readString(Paths.get(logFilePath)));
         Assert.assertTrue(variablesHtml.contains("class='table-container'"),
             "Variables HTML should wrap the table in .table-container");
         Assert.assertTrue(variablesHtml.contains("Employee Roster"),
@@ -616,7 +608,32 @@ public class RenderingShowcaseTest {
         Assert.assertTrue(variablesHtml.contains(unbreakableToken),
             "Variables HTML should preserve unbreakable token (overflow-wrap stress)");
 
-        System.out.println("Wide table variable artifact: " + variableFiles[0].getAbsolutePath());
+        System.out.println("Wide table variable artifact: " + logFilePath);
+    }
+
+    @Test
+    public void testWhitespaceMarkersKeepEscapingAndLineEndings() {
+        String trail = "<span class='ws-marker ws-trail' aria-hidden='true'>··</span>";
+        String newline = "<span class='ws-marker ws-nl' aria-hidden='true'>↵</span>\n";
+        String tab = "<span class='ws-marker ws-tab' aria-hidden='true'>→</span>\t";
+        Assert.assertEquals(HTMLGenerator.escapeWithWhitespaceMarkers(null), "");
+        Assert.assertEquals(HTMLGenerator.escapeWithWhitespaceMarkers(""), "");
+        Assert.assertEquals(HTMLGenerator.escapeWithWhitespaceMarkers("<&> $ \\  \r\n\tend  "),
+                "&lt;&amp;&gt; $ \\" + trail + "\r" + newline + tab + "end" + trail);
+        Assert.assertEquals(HTMLGenerator.escapeWithWhitespaceMarkers("a  b  \n  "),
+                "a  b" + trail + newline + trail);
+    }
+
+    @Test(timeOut = 5000)
+    public void testLongSpaceRunsKeepTheirValuesWithoutRepeatedMatching() {
+        String spaces = " ".repeat(65536);
+        String interior = "left" + spaces + "right";
+        Assert.assertEquals(HTMLGenerator.escapeWithWhitespaceMarkers(interior), interior);
+        String marked = "left<span class='ws-marker ws-trail' aria-hidden='true'>"
+                + "·".repeat(spaces.length()) + "</span>";
+        Assert.assertEquals(HTMLGenerator.escapeWithWhitespaceMarkers("left" + spaces), marked);
+        Assert.assertEquals(HTMLGenerator.escapeWithWhitespaceMarkers("left" + spaces + "\r\nright"),
+                marked + "\r<span class='ws-marker ws-nl' aria-hidden='true'>↵</span>\nright");
     }
 
     @Test
@@ -639,7 +656,7 @@ public class RenderingShowcaseTest {
 
         new StopLoggerSession().stop(customLogger);
 
-        String logHtml = new String(Files.readAllBytes(Paths.get(logFilePath)));
+        String logHtml = CompressedSnapshots.expand(new String(Files.readAllBytes(Paths.get(logFilePath))));
         Assert.assertTrue(logHtml.contains("class='message-cell'"),
             "Message cell should carry the message-cell class so pre-wrap can target it");
         Assert.assertTrue(logHtml.contains("class='ws-marker ws-nl'"),
@@ -668,12 +685,8 @@ public class RenderingShowcaseTest {
 
         new StopLoggerSession().stop(customLogger);
 
-        File[] variableFiles = new File(testPath + "variables")
-                .listFiles((dir, name) -> name.endsWith(".html"));
-        Assert.assertNotNull(variableFiles, "Variables directory should contain files");
-        Assert.assertEquals(variableFiles.length, 1);
-
-        String variablesHtml = new String(Files.readAllBytes(variableFiles[0].toPath()));
+        Assert.assertFalse(Files.exists(Paths.get(testPath, "variables")), "no variable sidecar files");
+        String variablesHtml = CompressedSnapshots.expand(Files.readString(Paths.get(logFilePath)));
         Assert.assertTrue(variablesHtml.contains("class='ws-marker ws-tab'"),
             "Tab in variable value should emit tab whitespace markers");
         Assert.assertTrue(variablesHtml.contains("→"),
@@ -701,12 +714,8 @@ public class RenderingShowcaseTest {
 
         new StopLoggerSession().stop(customLogger);
 
-        File[] variableFiles = new File(testPath + "variables")
-                .listFiles((dir, name) -> name.endsWith(".html"));
-        Assert.assertNotNull(variableFiles);
-        Assert.assertEquals(variableFiles.length, 1);
-
-        String variablesHtml = new String(Files.readAllBytes(variableFiles[0].toPath()));
+        Assert.assertFalse(Files.exists(Paths.get(testPath, "variables")), "no variable sidecar files");
+        String variablesHtml = CompressedSnapshots.expand(Files.readString(Paths.get(logFilePath)));
         Assert.assertTrue(variablesHtml.contains("class='ws-marker ws-trail'"),
             "Trailing spaces should emit ws-trail marker spans");
         Assert.assertTrue(variablesHtml.contains("···"),
@@ -715,7 +724,7 @@ public class RenderingShowcaseTest {
 
     @Test
     public void testStickyTableSummaryStyleEmitted() throws Exception {
-        // The variables.html template carries the CSS rule that pins the
+        // The inline variable styles carries the CSS rule that pins the
         // <summary> of details.full-width while the table is in view. We
         // assert the rule is present in the rendered output.
         String testPath = "src/test/target/test-artifacts/sticky-summary-" + System.currentTimeMillis() + "/";
@@ -739,18 +748,14 @@ public class RenderingShowcaseTest {
 
         new StopLoggerSession().stop(customLogger);
 
-        File[] variableFiles = new File(testPath + "variables")
-                .listFiles((dir, name) -> name.endsWith(".html"));
-        Assert.assertNotNull(variableFiles);
-        Assert.assertEquals(variableFiles.length, 1);
-
-        String variablesHtml = new String(Files.readAllBytes(variableFiles[0].toPath()));
+        Assert.assertFalse(Files.exists(Paths.get(testPath, "variables")), "no variable sidecar files");
+        String variablesHtml = CompressedSnapshots.expand(Files.readString(Paths.get(logFilePath)));
         Assert.assertTrue(variablesHtml.contains("details.full-width > summary"),
             "Sticky summary CSS rule should be present in the variables template");
         Assert.assertTrue(variablesHtml.contains("position: sticky"),
             "Sticky positioning should be declared in the variables template");
-        Assert.assertTrue(variablesHtml.contains("--summary-h"),
-            "Summary height variable should be declared so the th can offset by it");
+        Assert.assertTrue(variablesHtml.contains("overflow: auto"),
+            "Wide tables have a local scroll area");
         Assert.assertTrue(variablesHtml.contains("<details class='full-width'>"),
             "Tables should be wrapped in details.full-width to receive sticky behavior");
     }
@@ -800,12 +805,8 @@ public class RenderingShowcaseTest {
 
         new StopLoggerSession().stop(customLogger);
 
-        File[] variableFiles = new File(testPath + "variables")
-                .listFiles((dir, name) -> name.endsWith(".html"));
-        Assert.assertNotNull(variableFiles);
-        Assert.assertEquals(variableFiles.length, 1);
-
-        String html = new String(Files.readAllBytes(variableFiles[0].toPath()));
+        Assert.assertFalse(Files.exists(Paths.get(testPath, "variables")), "no variable sidecar files");
+        String html = CompressedSnapshots.expand(Files.readString(Paths.get(logFilePath)));
         Assert.assertTrue(html.contains("level-1-marker"), "Level 1 dict marker should render");
         Assert.assertTrue(html.contains("level-2-marker"), "Level 2 list scalar should render");
         Assert.assertTrue(html.contains("level-3-marker"), "Level 3 dict marker should render");
@@ -817,7 +818,7 @@ public class RenderingShowcaseTest {
         Assert.assertTrue(detailsCount >= 4,
             "Expected at least 4 <details> elements for the nesting; got " + detailsCount);
 
-        System.out.println("Deeply-nested artifact: " + variableFiles[0].getAbsolutePath());
+        System.out.println("Deeply-nested artifact: " + logFilePath);
     }
 
     @Test
@@ -853,19 +854,15 @@ public class RenderingShowcaseTest {
 
         new StopLoggerSession().stop(customLogger);
 
-        File[] variableFiles = new File(testPath + "variables")
-                .listFiles((dir, name) -> name.endsWith(".html"));
-        Assert.assertNotNull(variableFiles);
-        Assert.assertEquals(variableFiles.length, 1);
-
-        String html = new String(Files.readAllBytes(variableFiles[0].toPath()));
+        Assert.assertFalse(Files.exists(Paths.get(testPath, "variables")), "no variable sidecar files");
+        String html = CompressedSnapshots.expand(Files.readString(Paths.get(logFilePath)));
         Assert.assertTrue(html.contains("List: 0 items"), "Empty list summary line");
         Assert.assertTrue(html.contains("Dictionary: 0 entries"), "Empty dict summary line");
         Assert.assertTrue(html.contains("Table: 0 rows x 2 columns"), "Empty table summary line");
         Assert.assertTrue(html.contains(">A<"), "Empty table column headers should still render");
         Assert.assertTrue(html.contains(">B<"), "Empty table column headers should still render");
 
-        System.out.println("Empty-containers artifact: " + variableFiles[0].getAbsolutePath());
+        System.out.println("Empty-containers artifact: " + logFilePath);
     }
 
     @Test
@@ -896,12 +893,8 @@ public class RenderingShowcaseTest {
 
         new StopLoggerSession().stop(customLogger);
 
-        File[] variableFiles = new File(testPath + "variables")
-                .listFiles((dir, name) -> name.endsWith(".html"));
-        Assert.assertNotNull(variableFiles);
-        Assert.assertEquals(variableFiles.length, 1);
-
-        String html = new String(Files.readAllBytes(variableFiles[0].toPath()));
+        Assert.assertFalse(Files.exists(Paths.get(testPath, "variables")), "no variable sidecar files");
+        String html = CompressedSnapshots.expand(Files.readString(Paths.get(logFilePath)));
         Assert.assertFalse(html.contains("<script>alert(1)</script>"),
             "Raw script tag in name must NOT survive into the rendered HTML (XSS)");
         Assert.assertTrue(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
@@ -911,7 +904,7 @@ public class RenderingShowcaseTest {
         Assert.assertTrue(html.contains("&lt;inner-key&gt;"),
             "Nested dict key with angle brackets must be HTML-escaped");
 
-        System.out.println("HTML-name artifact: " + variableFiles[0].getAbsolutePath());
+        System.out.println("HTML-name artifact: " + logFilePath);
     }
 
     @Test
@@ -955,12 +948,8 @@ public class RenderingShowcaseTest {
 
         new StopLoggerSession().stop(customLogger);
 
-        File[] variableFiles = new File(testPath + "variables")
-                .listFiles((dir, name) -> name.endsWith(".html"));
-        Assert.assertNotNull(variableFiles);
-        Assert.assertEquals(variableFiles.length, 1);
-
-        String html = new String(Files.readAllBytes(variableFiles[0].toPath()));
+        Assert.assertFalse(Files.exists(Paths.get(testPath, "variables")), "no variable sidecar files");
+        String html = CompressedSnapshots.expand(Files.readString(Paths.get(logFilePath)));
         Assert.assertTrue(html.contains("Table: 3 rows x 1 columns"),
             "Single-column table summary");
         Assert.assertTrue(html.contains(">OnlyColumn<"), "Single column header");
@@ -970,13 +959,13 @@ public class RenderingShowcaseTest {
         Assert.assertTrue(html.contains("before"), "Row before all-null row");
         Assert.assertTrue(html.contains("after"), "Row after all-null row");
 
-        System.out.println("Edge-tables artifact: " + variableFiles[0].getAbsolutePath());
+        System.out.println("Edge-tables artifact: " + logFilePath);
     }
 
     @Test
     public void testFlatLayoutAppliedNoOuterRadius() throws Exception {
         // The flat layout drops --radius and the body padding. We assert the
-        // rendered log and variables files no longer reference var(--radius)
+        // rendered log and inline variables no longer reference var(--radius)
         // and that body uses padding: 0 so content stretches to the viewport.
         String testPath = "src/test/target/test-artifacts/flat-layout-" + System.currentTimeMillis() + "/";
         Files.createDirectories(Paths.get(testPath));
@@ -993,11 +982,9 @@ public class RenderingShowcaseTest {
 
         new StopLoggerSession().stop(customLogger);
 
-        String logHtml = new String(Files.readAllBytes(Paths.get(logFilePath)));
-        File[] variableFiles = new File(testPath + "variables")
-                .listFiles((dir, name) -> name.endsWith(".html"));
-        Assert.assertNotNull(variableFiles);
-        String variablesHtml = new String(Files.readAllBytes(variableFiles[0].toPath()));
+        String logHtml = CompressedSnapshots.expand(new String(Files.readAllBytes(Paths.get(logFilePath))));
+        Assert.assertFalse(Files.exists(Paths.get(testPath, "variables")), "no variable sidecar files");
+        String variablesHtml = CompressedSnapshots.expand(Files.readString(Paths.get(logFilePath)));
 
         Assert.assertFalse(logHtml.contains("border-radius: var(--radius)"),
             "log.html should no longer round outer corners with --radius");
@@ -1098,11 +1085,11 @@ public class RenderingShowcaseTest {
         Assert.assertTrue(pngs >= 3,
                 "showcase should produce at least 3 PNGs (1 manual + 2 video posters); got " + pngs);
 
-        String html = Files.readString(Paths.get(logFilePath),
-                java.nio.charset.StandardCharsets.UTF_8);
+        String html = CompressedSnapshots.expand(Files.readString(Paths.get(logFilePath),
+                java.nio.charset.StandardCharsets.UTF_8));
         Assert.assertTrue(html.contains("video-link"),
                 "rendered HTML must contain video-link class");
-        Assert.assertTrue(html.contains("<th>Screen</th>"),
+        Assert.assertTrue(html.contains("<th scope='col'>Screen</th>"),
                 "rendered HTML must contain the renamed Screen header");
 
         System.out.println("Video showcase artifact: " + new File(logFilePath).getAbsolutePath());

@@ -9,8 +9,9 @@ import org.apache.logging.log4j.core.config.plugins.PluginBuilderFactory;
 
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileReader;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -68,22 +69,7 @@ public class EntryCountBasedTriggeringPolicy extends AbstractTriggeringPolicy {
         return currentEntryCount.get();
     }
 
-    /**
-     * Counts existing log entries in the file by counting &lt;tr&gt;&lt;td&gt;
-     * patterns. This pattern matches only data rows, excluding header rows
-     * which use &lt;th&gt; instead.
-     *
-     * <p>Pure read-only: footer stripping happens earlier in
-     * {@code CustomLogger.stripTrailingFooterIfPresent} before Log4j2 opens
-     * the file. By the time this method runs, RollingFileManager already
-     * holds an append-mode handle on the file, which on Windows blocks any
-     * truncate/rename from this thread. Reading is unaffected because the
-     * manager's share mode grants read access.
-     *
-     * @param filePath Path to the log file
-     * @return Number of existing log entries in the file, or 0 if file
-     *         doesn't exist or can't be read
-     */
+    /** Counts completed events, independent of tables inside variable snapshots. */
     private int countExistingEntries(String filePath) {
         File file = new File(filePath);
         if (!file.exists() || file.length() == 0) {
@@ -91,20 +77,13 @@ public class EntryCountBasedTriggeringPolicy extends AbstractTriggeringPolicy {
         }
 
         int count = 0;
-        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
+        try (BufferedReader reader = Files.newBufferedReader(file.toPath(), StandardCharsets.UTF_8)) {
             String line;
             while ((line = reader.readLine()) != null) {
-                String lowerLine = line.toLowerCase();
-                int index = 0;
-                while ((index = lowerLine.indexOf("<tr><td>", index)) != -1) {
-                    count++;
-                    index += 8;
-                }
+                if (line.equals(CustomHTMLLayout.ENTRY_END.trim())) count++;
             }
         } catch (IOException e) {
-            // Safe fallback: 0 means "treat as fresh file", so we may
-            // rollover slightly early on a transient read failure, never
-            // overshoot the maxEntries cap.
+            // Preserve the existing fallback when a file cannot be read.
             return 0;
         }
         return count;

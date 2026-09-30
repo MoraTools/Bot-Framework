@@ -1,5 +1,7 @@
 package com.automationanywhere.botcommand.utilities.screen.recorder;
 
+import screen.process.RecorderTestSupport;
+
 import org.apache.logging.log4j.Level;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -16,7 +18,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Instant;
-import java.util.Comparator;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
@@ -61,9 +62,9 @@ public class CrashSweepRecoveryTest {
 
     @AfterMethod
     public void tearDown() {
-        deleteRecursivelyQuietly(appDataRoot);
-        deleteRecursivelyQuietly(logDir);
-        deleteRecursivelyQuietly(seedSegmentsDir);
+        RecorderTestSupport.deleteRecursivelyQuietly(appDataRoot);
+        RecorderTestSupport.deleteRecursivelyQuietly(logDir);
+        RecorderTestSupport.deleteRecursivelyQuietly(seedSegmentsDir);
     }
 
     @Test
@@ -344,18 +345,4 @@ public class CrashSweepRecoveryTest {
         }
     }
 
-    private static void deleteRecursivelyQuietly(Path root) {
-        if (root == null || !Files.exists(root)) {
-            return;
-        }
-        try (Stream<Path> walk = Files.walk(root)) {
-            walk.sorted(Comparator.reverseOrder()).forEach(p -> {
-                try {
-                    Files.deleteIfExists(p);
-                } catch (IOException ignored) {
-                }
-            });
-        } catch (IOException ignored) {
-        }
-    }
 }

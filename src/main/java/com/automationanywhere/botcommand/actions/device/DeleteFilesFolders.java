@@ -152,11 +152,11 @@ public class DeleteFilesFolders {
             // Phase 2: Process the data - resolve conflicts between delete and skip lists
             DeletionProcessor processor = new DeletionProcessor(
                     basePath,
-                    collector.getFilesToDelete(),
-                    collector.getDirectoriesToDelete(),
-                    collector.getFilesToSkip(),
-                    collector.getDirectoriesToSkip(),
-                    collector.getYoungFiles()
+                    collector.filesToDelete,
+                    collector.directoriesToDelete,
+                    collector.filesToSkip,
+                    collector.directoriesToSkip,
+                    collector.youngFiles
             );
 
             // Phase 3: Execute deletions
@@ -280,7 +280,7 @@ public class DeleteFilesFolders {
             }
 
             // Check if this directory should be skipped based on pattern
-            if (skipFolders && matchesPattern(dir.toFile().getAbsolutePath(), skipFolderPattern)) {
+            if (skipFolders && skipFolderPattern.matcher(dir.toFile().getAbsolutePath()).matches()) {
                 LOGGER.info("Skipping directory based on pattern: " + dir);
                 directoriesToSkip.add(dir);
                 return FileVisitResult.SKIP_SUBTREE; // Don't process contents of skipped directories
@@ -306,7 +306,7 @@ public class DeleteFilesFolders {
         @Override
         public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
             // Check if this file should be skipped based on pattern
-            if (skipFiles && matchesPattern(file.toFile().getAbsolutePath(), skipFilePattern)) {
+            if (skipFiles && skipFilePattern.matcher(file.toFile().getAbsolutePath()).matches()) {
                 LOGGER.info("Skipping file based on pattern: " + file);
                 filesToSkip.add(file);
                 return FileVisitResult.CONTINUE;
@@ -355,30 +355,6 @@ public class DeleteFilesFolders {
             } catch (PatternSyntaxException e) {
                 throw new BotCommandException("Invalid regex pattern: '" + pattern + "'. " + e.getMessage());
             }
-        }
-
-        private boolean matchesPattern(String pathString, Pattern pattern) {
-            return pattern.matcher(pathString).matches();
-        }
-
-        public Set<Path> getFilesToDelete() {
-            return filesToDelete;
-        }
-
-        public Set<Path> getDirectoriesToDelete() {
-            return directoriesToDelete;
-        }
-
-        public Set<Path> getFilesToSkip() {
-            return filesToSkip;
-        }
-
-        public Set<Path> getDirectoriesToSkip() {
-            return directoriesToSkip;
-        }
-
-        public Set<Path> getYoungFiles() {
-            return youngFiles;
         }
     }
 

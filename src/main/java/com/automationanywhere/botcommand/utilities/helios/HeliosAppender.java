@@ -8,9 +8,7 @@ import org.apache.logging.log4j.core.filter.MarkerFilter;
 import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.core.appender.AbstractAppender;
 import org.apache.logging.log4j.core.config.Property;
-import org.json.JSONObject;
 
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.Map;
@@ -18,7 +16,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Snapshots log values to disk on the caller thread; HTTP never runs on that thread. */
 public final class HeliosAppender extends AbstractAppender {
-    private final HeliosJsonLayout layout = new HeliosJsonLayout(StandardCharsets.UTF_8, "");
+    private final HeliosJsonLayout layout = new HeliosJsonLayout();
     private final Logger logger;
     private static final String DIAGNOSTIC = "HELIOS_LOCAL_DIAGNOSTIC";
     private final AtomicBoolean warned = new AtomicBoolean();
@@ -28,12 +26,16 @@ public final class HeliosAppender extends AbstractAppender {
     private boolean captureFailed;
 
     public HeliosAppender(String name, HeliosConfig config, Logger logger) {
+        this(name, config, logger, java.util.UUID.randomUUID().toString());
+    }
+
+    public HeliosAppender(String name, HeliosConfig config, Logger logger, String loggerSessionId) {
         super(name, MarkerFilter.createFilter(DIAGNOSTIC, Filter.Result.DENY, Filter.Result.NEUTRAL),
                 null, true, Property.EMPTY_ARRAY);
         this.logger = logger;
         try {
             sink = new HeliosSink(config, Paths.get(System.getProperty("helios.outbox.directory",
-                    Paths.get(System.getProperty("user.home"), ".helios", "outbox").toString())), this::warn);
+                    Paths.get(System.getProperty("user.home"), ".helios", "outbox").toString())), this::warn, loggerSessionId);
         } catch (Exception error) {
             captureFailed = true;
             warn("Cloud capture could not start. HTML logging continues; cloud logs are incomplete.");
@@ -45,8 +47,23 @@ public final class HeliosAppender extends AbstractAppender {
         int ordinal = expectedEntries++;
         if (sink == null) return;
         try {
-            JSONObject record = new JSONObject(layout.toSerializable(event)).put("firstOrdinal", ordinal);
-            sink.append(record);
+            org.json.JSONObject row = layout.toJson(event, ordinal);
+            Object[] parameters = event.getMessage().getParameters();
+            if (parameters != null && parameters.length > 0 && parameters[0] instanceof Map) {
+                Object request = ((Map<?, ?>) parameters[0]).get(ErrorMedia.COLUMN);
+                if (request instanceof ErrorMedia) {
+                    try { row.getJSONArray("entries").getJSONObject(0).put("media", sink.registerMedia(ordinal, (ErrorMedia) request)); }
+                    catch (Exception error) {
+                        org.json.JSONArray unavailable = new org.json.JSONArray().put(new org.json.JSONObject()
+                                .put("kind", "screenshot").put("state", "unavailable").put("reason", "storageFailure"));
+                        if (((ErrorMedia) request).video) unavailable.put(new org.json.JSONObject()
+                                .put("kind", "video").put("state", "unavailable").put("reason", "storageFailure"));
+                        row.getJSONArray("entries").getJSONObject(0).put("media", unavailable);
+                        warn("ERROR media could not be saved. The ERROR row continues to Helios.");
+                    }
+                }
+            }
+            sink.append(row);
         } catch (Exception error) {
             if (!captureFailed) {
                 captureFailed = true;
@@ -57,6 +74,8 @@ public final class HeliosAppender extends AbstractAppender {
             }
         }
     }
+
+    public void stopMedia() { if (sink != null) sink.stopMedia(); }
 
     public void finish() {
         int count;

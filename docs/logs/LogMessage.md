@@ -35,6 +35,12 @@
 - **Type:** `Map<String, Value>`
 - **Description:** A map of common datatype variables and their values to log, applicable if "Log variable values" is set to "Yes".
 
+## Local HTML output
+
+Each message is a complete entry in the HTML log. When variable logging is enabled, the **Variables** button opens a shared dialog to show the saved values, including nested lists, dictionaries, records, and tables. Values are saved when the message is logged. Each snapshot is compressed in the HTML and decoded only when opened. This requires JavaScript and gzip `DecompressionStream` support in the browser. Messages stay readable without JavaScript. No separate variable HTML file is created, and local values are not capped by the Helios limits.
+
+Screenshots and recordings stay in separate files linked with relative paths. A missing media file does not prevent reading the message or variables. Copy `screenshots/` and `clips/` with the HTML to retain media access. Refresh an open log to see later entries.
+
 ## Helios Cloud streaming
 
 When the parent logger session has Helios Cloud streaming enabled, the logged variables are streamed with the entry: each one as its name, type label and plain-text value (lists, dictionaries, records and tables as JSON text). At most 100 variables per entry are sent and each value is cut at 8192 characters. With streaming disabled the variables stay on the runner, in the HTML log only.
@@ -52,3 +58,13 @@ Throws `BotCommandException` if:
 - The log message is null or empty.
 - There are issues capturing the screenshot (if enabled).
 - Any other unexpected error occurs during the logging process.
+
+## Helios ERROR media
+
+With Helios streaming enabled, every ERROR call declares media that inherits the session's Screen recording
+settings. Active ERROR recording uploads the local clip and a separate screenshot using the configured buffer and
+codec. No video, ERROR unchecked, or disabled recording uploads a screenshot. INFO/WARN recording stays local.
+Capture and upload failure do not suppress the ERROR row. Requested video remains unavailable when the recorder
+fails; its still is independent, including an empty ring, full encode queue, failed encode, or clip over 8 MiB.
+The returned screenshot path still depends on Capture Screenshot. Automatic cloud capture does not add a returned
+path or start a recorder when No video is selected.

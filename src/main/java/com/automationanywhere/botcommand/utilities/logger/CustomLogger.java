@@ -1,6 +1,8 @@
 package com.automationanywhere.botcommand.utilities.logger;
 
 import com.automationanywhere.botcommand.utilities.helios.HeliosConfig;
+import com.automationanywhere.botcommand.utilities.helios.CloudMediaMode;
+import com.automationanywhere.botcommand.utilities.screen.recorder.CaptureResult;
 import com.automationanywhere.botcommand.utilities.helios.HeliosAppender;
 import com.automationanywhere.botcommand.utilities.screen.recorder.EncodingMode;
 import com.automationanywhere.botcommand.utilities.screen.recorder.ScreenRecorder;
@@ -9,6 +11,7 @@ import org.apache.commons.io.FilenameUtils;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.AbstractManager;
 import org.apache.logging.log4j.core.config.builder.api.AppenderComponentBuilder;
 import org.apache.logging.log4j.core.config.builder.api.ConfigurationBuilder;
 import org.apache.logging.log4j.core.config.builder.api.LayoutComponentBuilder;
@@ -16,18 +19,21 @@ import org.apache.logging.log4j.core.config.builder.api.LoggerComponentBuilder;
 import org.apache.logging.log4j.core.config.builder.impl.BuiltConfiguration;
 import org.apache.logging.log4j.core.config.builder.impl.DefaultConfigurationBuilder;
 
-import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
  * @author Sumit Kumar
@@ -38,8 +44,9 @@ public class CustomLogger implements CloseableSessionObject {
     private final String loggerId;
     private final LoggerContext loggerContext;
     private final Map<Level, String> screenshotFolderPaths;
-    private final Map<Level, String> variablesFolderPaths;
     private final ScreenRecorder recorder;
+    private final Set<Level> localRecordingLevels;
+    private final CloudMediaMode cloudMediaMode;
 
     /** Non-null only while Helios Cloud streaming is enabled for this session. */
     private HeliosAppender heliosAppender;
@@ -66,70 +73,8 @@ public class CustomLogger implements CloseableSessionObject {
     public CustomLogger(String loggerName, String logFilePath, int maxLogEntries,
                         int bufferSeconds, Set<Level> recordingLevels,
                         EncodingMode encodingMode, HeliosConfig heliosConfig) throws IOException {
-        this.loggerId = UUID.randomUUID().toString();
-
-        // Create screenshot folder at the same location as log file
-        String baseDir = FilenameUtils.getFullPath(logFilePath);
-        String screenshotFolder = baseDir + "screenshots";
-        String variablesFolder = baseDir + "variables";
-
-        this.screenshotFolderPaths = new HashMap<>();
-        this.variablesFolderPaths = new HashMap<>();
-
-        // Use the same folder for all levels when using a combined log file
-        this.screenshotFolderPaths.put(Level.INFO, screenshotFolder);
-        this.screenshotFolderPaths.put(Level.WARN, screenshotFolder);
-        this.screenshotFolderPaths.put(Level.ERROR, screenshotFolder);
-
-        this.variablesFolderPaths.put(Level.INFO, variablesFolder);
-        this.variablesFolderPaths.put(Level.WARN, variablesFolder);
-        this.variablesFolderPaths.put(Level.ERROR, variablesFolder);
-
-        // Create directories
-        createDirectories();
-
-        // Create a unique logger context for this instance
-        LoggerContext context = createNewLoggerContext();
-
-        // Setup logger configuration
-        ConfigurationBuilder<BuiltConfiguration> builder = new DefaultConfigurationBuilder();
-        setupLoggerConfiguration(builder);
-
-        AppenderComponentBuilder appenderBuilder = getCustomAppenderBuilder(builder, "COMBINED_" + loggerId,
-                logFilePath,
-                maxLogEntries);
-        builder.add(appenderBuilder);
-
-        LoggerComponentBuilder loggerBuilder = builder.newLogger(loggerName, Level.INFO)
-                .add(builder.newAppenderRef("COMBINED_" + loggerId));
-        builder.add(loggerBuilder);
-
-        builder.add(builder.newRootLogger(Level.INFO));
-
-        // Strip the previous session's trailing footer BEFORE Log4j2 opens
-        // the file. Once context.start() runs, RollingFileManager grabs an
-        // append-mode handle that prevents truncation on Windows.
-        stripTrailingFooterIfPresent(logFilePath);
-
-        // Initialize the context with the configuration
-        BuiltConfiguration config = builder.build();
-        context.start(config);
-        this.loggerContext = context;
-
-        // Get logger from the new context
-        this.logger = context.getLogger(loggerName);
-        if (heliosConfig != null) {
-            heliosAppender = new HeliosAppender("HELIOS_" + loggerId, heliosConfig, this.logger);
-            heliosAppender.start();
-            config.addAppender(heliosAppender);
-            config.getLoggerConfig(loggerName).addAppender(heliosAppender, Level.INFO, heliosAppender.getFilter());
-            context.updateLoggers();
-        }
-
-        // Optionally start the screen recorder. Returns DISABLED on any failure.
-        Path logDir = Paths.get(FilenameUtils.getFullPath(logFilePath));
-        this.recorder = ScreenRecorder.start(loggerId, logDir, bufferSeconds, recordingLevels,
-                encodingMode);
+        this(loggerName, Collections.singletonMap(Level.INFO, logFilePath), maxLogEntries,
+                bufferSeconds, recordingLevels, encodingMode, heliosConfig, false);
     }
 
     private void createDirectories() throws IOException {
@@ -139,11 +84,6 @@ public class CustomLogger implements CloseableSessionObject {
             Files.createDirectories(directoryPath);
         }
 
-        // Create variables directories
-        for (String path : variablesFolderPaths.values()) {
-            Path directoryPath = Paths.get(path);
-            Files.createDirectories(directoryPath);
-        }
     }
 
     private LoggerContext createNewLoggerContext() {
@@ -162,6 +102,7 @@ public class CustomLogger implements CloseableSessionObject {
     private AppenderComponentBuilder getCustomAppenderBuilder(ConfigurationBuilder<BuiltConfiguration> builder,
                                                               String appenderName,
                                                               String filePath, int maxLogEntries) {
+        filePath = normalizedLogPath(filePath);
         LayoutComponentBuilder layoutBuilder = builder.newLayout("CustomHTMLLayout")
                 .addAttribute("charset", "UTF-8");
 
@@ -188,72 +129,56 @@ public class CustomLogger implements CloseableSessionObject {
             );
     }
 
-    /**
-     * Removes the closing HTML footer from an existing log file so the next
-     * session's entries append inside the open {@code <tbody>} instead of
-     * after the closing tags. Truncates the file at the byte offset of the
-     * first {@code </tbody>} marker found.
-     *
-     * <p>This is the standard mechanism that makes append-across-sessions
-     * work: each session writes the footer on close, the next session
-     * strips it on open, writes its entries, and writes a new footer on
-     * its own close.
-     *
-     * <p><strong>Must run before Log4j2's RollingFileManager opens the
-     * file.</strong> On Windows, the manager opens the file with a share
-     * mode that grants reads but blocks rename/truncate from any other
-     * handle, so this strip cannot happen from inside a triggering policy's
-     * {@code initialize()} hook (the file is already locked by then).
-     *
-     * <p>No-op when:
-     * <ul>
-     *     <li>the file does not exist or is empty (fresh session),</li>
-     *     <li>no {@code </tbody>} marker is present (the previous JVM died
-     *         before writing the footer on close; nothing to strip and
-     *         every existing {@code <tr>} row stays intact).</li>
-     * </ul>
-     *
-     * <p>Safe under any UTF-8 content: {@code </tbody>} is pure ASCII and
-     * the byte sequence cannot occur inside a multi-byte UTF-8 character
-     * (continuation bytes are 0x80-0xBF, ASCII bytes are 0x00-0x7F).
-     *
-     * <p>Best-effort: any IOException is swallowed. The worst-case fallout
-     * is a slightly-malformed log render, never a logger startup failure.
-     */
-    private static void stripTrailingFooterIfPresent(String filePath) {
-        File file = new File(filePath);
-        if (!file.isFile() || file.length() == 0) {
-            return;
-        }
-        try {
-            byte[] data = Files.readAllBytes(file.toPath());
-            byte[] marker = "</tbody>".getBytes(StandardCharsets.US_ASCII);
-            int offset = indexOfBytes(data, marker);
-            if (offset < 0) {
-                return;
-            }
-            try (RandomAccessFile raf = new RandomAccessFile(file, "rw")) {
-                raf.setLength(offset);
-            }
-        } catch (IOException ignored) {
-            // best-effort; logger startup must not fail on this
-        }
+    private static String normalizedLogPath(String filePath) {
+        return Paths.get(filePath).toAbsolutePath().normalize().toString();
     }
 
-    private static int indexOfBytes(byte[] haystack, byte[] needle) {
-        if (needle.length == 0 || haystack.length < needle.length) {
-            return -1;
+    // ponytail: serialize startup in this JVM; use per-path locks if independent startups contend.
+    private static synchronized BuiltConfiguration startContext(LoggerContext context,
+            ConfigurationBuilder<BuiltConfiguration> builder, Set<String> filePaths) throws IOException {
+        for (String filePath : filePaths) {
+            prepareLogFile(filePath);
         }
-        outer:
-        for (int i = 0; i <= haystack.length - needle.length; i++) {
-            for (int j = 0; j < needle.length; j++) {
-                if (haystack[i + j] != needle[j]) {
-                    continue outer;
-                }
+        // Keep the lock until Log4j has registered the managers checked by prepareLogFile.
+        BuiltConfiguration config = builder.build();
+        context.start(config);
+        return config;
+    }
+
+    /**
+     * Append only to a recognized file ending at a complete header or entry.
+     * Legacy and interrupted files are moved intact beside the active file,
+     * keeping their relative media/variable links and every original byte.
+     */
+    private static void prepareLogFile(String filePath) throws IOException {
+        filePath = normalizedLogPath(filePath);
+        // Another local session may be part-way through writing a complete entry.
+        if (AbstractManager.hasManager(filePath)) return;
+        Path path = Paths.get(filePath);
+        if (!Files.exists(path) || Files.size(path) == 0) return;
+        try (RandomAccessFile file = new RandomAccessFile(path.toFile(), "r")) {
+            byte[] prefix = new byte[(int) Math.min(128, file.length())];
+            file.readFully(prefix);
+            byte[] tail = new byte[(int) Math.min(64, file.length())];
+            file.seek(file.length() - tail.length);
+            file.readFully(tail);
+            String start = new String(prefix, StandardCharsets.UTF_8);
+            String end = new String(tail, StandardCharsets.UTF_8);
+            if (start.startsWith("<!DOCTYPE html>\n" + CustomHTMLLayout.FORMAT_MARKER + "\n")
+                    && (end.endsWith(CustomHTMLLayout.HEADER_END) || end.endsWith(CustomHTMLLayout.ENTRY_END))) {
+                return;
             }
-            return i;
         }
-        return -1;
+        Pattern pattern = Pattern.compile("(\\d+)_" + Pattern.quote(path.getFileName().toString()));
+        int lastIndex;
+        try (Stream<Path> files = Files.list(path.getParent())) {
+            lastIndex = files.map(file -> pattern.matcher(file.getFileName().toString()))
+                    .filter(Matcher::matches).mapToInt(match -> Integer.parseInt(match.group(1)))
+                    .max().orElse(0);
+        }
+        Path archive = path.resolveSibling(Math.addExact(lastIndex, 1) + "_" + path.getFileName());
+        // No REPLACE_EXISTING: a conflicting archive must never be overwritten.
+        Files.move(path, archive);
     }
 
     // Constructor for multiple log files based on the level (no video recording)
@@ -278,80 +203,86 @@ public class CustomLogger implements CloseableSessionObject {
     public CustomLogger(String loggerName, Map<Level, String> levelFilePathMap, int maxLogEntries,
                         int bufferSeconds, Set<Level> recordingLevels,
                         EncodingMode encodingMode, HeliosConfig heliosConfig) throws IOException {
+        this(loggerName, levelFilePathMap, maxLogEntries, bufferSeconds, recordingLevels, encodingMode,
+                heliosConfig, true);
+    }
+
+    private CustomLogger(String loggerName, Map<Level, String> levelFilePathMap, int maxLogEntries,
+                         int bufferSeconds, Set<Level> recordingLevels, EncodingMode encodingMode,
+                         HeliosConfig heliosConfig, boolean splitFiles) throws IOException {
         this.loggerId = UUID.randomUUID().toString();
+        this.localRecordingLevels = recordingLevels == null ? new HashSet<>() : new HashSet<>(recordingLevels);
+        this.cloudMediaMode = inheritedMediaMode(heliosConfig, bufferSeconds);
         this.screenshotFolderPaths = new HashMap<>();
-        this.variablesFolderPaths = new HashMap<>();
 
-        // Create a screenshot and variables folder alongside each log file
         for (Map.Entry<Level, String> entry : levelFilePathMap.entrySet()) {
-            Level level = entry.getKey();
-            String filePath = entry.getValue();
-            String baseDir = FilenameUtils.getFullPath(filePath);
-
-            this.screenshotFolderPaths.put(level, baseDir + "screenshots");
-            this.variablesFolderPaths.put(level, baseDir + "variables");
+            this.screenshotFolderPaths.put(entry.getKey(), FilenameUtils.getFullPath(entry.getValue()) + "screenshots");
         }
-
-        // Create all directories
+        if (!splitFiles) {
+            this.screenshotFolderPaths.put(Level.WARN, this.screenshotFolderPaths.get(Level.INFO));
+            this.screenshotFolderPaths.put(Level.ERROR, this.screenshotFolderPaths.get(Level.INFO));
+        }
         createDirectories();
 
-        // Create a unique logger context for this instance
         LoggerContext context = createNewLoggerContext();
-
         ConfigurationBuilder<BuiltConfiguration> builder = new DefaultConfigurationBuilder();
         setupLoggerConfiguration(builder);
 
-        // Creating appender based on provided level-file path map
         for (Map.Entry<Level, String> entry : levelFilePathMap.entrySet()) {
-            Level level = entry.getKey();
-            String filePath = entry.getValue();
-            String appenderName = level.name() + "_" + loggerId;
-
-            AppenderComponentBuilder appenderBuilder = getCustomAppenderBuilder(builder, appenderName, filePath,
-                    maxLogEntries);
-            // Only accept logs for this specific level
-            appenderBuilder.add(builder.newFilter("LevelMatchFilter", "ACCEPT", "DENY")
-                    .addAttribute("level", level));
-
+            String appenderName = (splitFiles ? entry.getKey().name() : "COMBINED") + "_" + loggerId;
+            AppenderComponentBuilder appenderBuilder = getCustomAppenderBuilder(builder, appenderName,
+                    entry.getValue(), maxLogEntries);
+            if (splitFiles) {
+                appenderBuilder.add(builder.newFilter("LevelMatchFilter", "ACCEPT", "DENY")
+                        .addAttribute("level", entry.getKey()));
+            }
             builder.add(appenderBuilder);
         }
 
-        // Configure the logger
-        LoggerComponentBuilder loggerBuilder = builder.newLogger(loggerName, Level.INFO)
-                .add(builder.newAppenderRef(Level.INFO.name() + "_" + loggerId))
-                .add(builder.newAppenderRef(Level.WARN.name() + "_" + loggerId))
-                .add(builder.newAppenderRef(Level.ERROR.name() + "_" + loggerId));
+        LoggerComponentBuilder loggerBuilder = builder.newLogger(loggerName, Level.INFO);
+        if (splitFiles) {
+            loggerBuilder.add(builder.newAppenderRef(Level.INFO.name() + "_" + loggerId))
+                    .add(builder.newAppenderRef(Level.WARN.name() + "_" + loggerId))
+                    .add(builder.newAppenderRef(Level.ERROR.name() + "_" + loggerId));
+        } else {
+            loggerBuilder.add(builder.newAppenderRef("COMBINED_" + loggerId));
+        }
         builder.add(loggerBuilder);
-
         builder.add(builder.newRootLogger(Level.INFO));
 
-        // Strip the previous session's trailing footer from each per-level
-        // file BEFORE Log4j2 opens any of them. See the helper's javadoc.
-        for (String levelPath : levelFilePathMap.values()) {
-            stripTrailingFooterIfPresent(levelPath);
-        }
-
-        // Initialize the context with the configuration
-        BuiltConfiguration config = builder.build();
-        context.start(config);
+        BuiltConfiguration config = startContext(context, builder, new HashSet<>(levelFilePathMap.values()));
         this.loggerContext = context;
-
-        // Get logger from the new context
         this.logger = context.getLogger(loggerName);
         if (heliosConfig != null) {
-            heliosAppender = new HeliosAppender("HELIOS_" + loggerId, heliosConfig, this.logger);
+            heliosAppender = new HeliosAppender("HELIOS_" + loggerId, heliosConfig, this.logger, loggerId);
             heliosAppender.start();
             config.addAppender(heliosAppender);
             config.getLoggerConfig(loggerName).addAppender(heliosAppender, Level.INFO, heliosAppender.getFilter());
             context.updateLoggers();
         }
 
-        // Optionally start the screen recorder. Recording artifacts (clips/, screenshots/posters)
-        // live next to the INFO log file because the HTML log uses relative paths.
+        // Recording artifacts use the INFO log directory for relative HTML media paths.
         Path recorderLogDir = Paths.get(FilenameUtils.getFullPath(
                 levelFilePathMap.getOrDefault(Level.INFO, levelFilePathMap.values().iterator().next())));
-        this.recorder = ScreenRecorder.start(loggerId, recorderLogDir, bufferSeconds, recordingLevels,
-                encodingMode);
+        this.recorder = startRecorder(recorderLogDir, bufferSeconds, encodingMode);
+    }
+
+    private CloudMediaMode inheritedMediaMode(HeliosConfig config, int bufferSeconds) {
+        if (config == null) return CloudMediaMode.OFF;
+        return bufferSeconds > 0 && localRecordingLevels.contains(Level.ERROR)
+                ? CloudMediaMode.VIDEO : CloudMediaMode.SCREENSHOT;
+    }
+
+    private ScreenRecorder startRecorder(Path directory, int seconds, EncodingMode mode) {
+        return ScreenRecorder.start(loggerId, directory, seconds, localRecordingLevels, mode, false,
+                cloudMediaMode == CloudMediaMode.VIDEO);
+    }
+
+    public CloudMediaMode getCloudMediaMode() { return cloudMediaMode; }
+
+    public CaptureResult snapshotForError(String captureId, boolean localRequired,
+            java.util.function.Consumer<CaptureResult> register) {
+        return recorder.snapshotForError(captureId, localRequired, register);
     }
 
     public Logger getLogger() {
@@ -360,7 +291,7 @@ public class CustomLogger implements CloseableSessionObject {
 
     /** True when the supplied level is in the configured recording-levels set and recorder is healthy. */
     public boolean shouldRecordVideoFor(Level level) {
-        return recorder.shouldRecordFor(level);
+        return localRecordingLevels.contains(level) && recorder.shouldRecordFor(level);
     }
 
     /**
@@ -389,6 +320,7 @@ public class CustomLogger implements CloseableSessionObject {
             // stops writing to the ring before pending stage-2 encodes drain, and the
             // session folder is deleted only after both are quiescent.
             recorder.close();
+            if (heliosAppender != null) heliosAppender.stopMedia();
         }
     }
 
@@ -401,14 +333,4 @@ public class CustomLogger implements CloseableSessionObject {
         return screenshotFolderPaths.getOrDefault(level, screenshotFolderPaths.get(Level.INFO));
     }
 
-    /**
-     * Returns the variables folder path for the specified log level
-     *
-     * @param level Log level
-     *
-     * @return variables folder path for the specified level
-     */
-    public String getVariablesFolderPath(Level level) {
-        return variablesFolderPaths.getOrDefault(level, variablesFolderPaths.get(Level.INFO));
-    }
 }

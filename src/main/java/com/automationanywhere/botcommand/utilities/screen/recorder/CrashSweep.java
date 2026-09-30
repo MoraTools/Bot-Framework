@@ -1,6 +1,8 @@
 package com.automationanywhere.botcommand.utilities.screen.recorder;
 
 import org.apache.logging.log4j.LogManager;
+import com.automationanywhere.botcommand.utilities.helios.HeliosMediaOutbox;
+import org.json.JSONObject;
 import org.apache.logging.log4j.Logger;
 
 import java.io.IOException;
@@ -122,7 +124,13 @@ final class CrashSweep {
         if (ownerMayBeRunning(folder)) return;
         String name = folder.getFileName().toString();
         if (name.endsWith(SALVAGING_SUFFIX)) {
+            if (hasManagedScratches(folder)) {
+                trySalvage(folder, appDataRoot, ffmpegExe);
+                if (hasManagedScratches(folder)) return;
+            }
+            if (!removeCloudSources(folder)) return;
             ScreenRecorder.deleteRecursivelyQuietly(folder);
+            if (!Files.exists(folder)) RecorderStorage.recovered(appDataRoot, name.substring(0, name.length() - SALVAGING_SUFFIX.length()));
             return;
         }
         Path claimed = folder.resolveSibling(name + SALVAGING_SUFFIX);
@@ -141,8 +149,39 @@ final class CrashSweep {
                 trySalvage(claimed, appDataRoot, ffmpegExe);
             }
         } finally {
-            ScreenRecorder.deleteRecursivelyQuietly(claimed);
+            if (!hasManagedScratches(claimed)) {
+                if (removeCloudSources(claimed)) {
+                    ScreenRecorder.deleteRecursivelyQuietly(claimed);
+                    if (!Files.exists(claimed)) RecorderStorage.recovered(appDataRoot, name);
+                }
+            }
         }
+    }
+
+    private static boolean removeCloudSources(Path folder) {
+        Path captures = folder.resolve("captures");
+        if (!Files.isDirectory(captures)) return true;
+        boolean removed = true;
+        try (Stream<Path> files = Files.list(captures)) {
+            for (Path metadata : files.filter(Files::isRegularFile).collect(java.util.stream.Collectors.toList())) {
+                try {
+                    JSONObject capture = new JSONObject(Files.readString(metadata));
+                    // ponytail: preserve shared crash originals when a local ownership upgrade could not be saved.
+                    // Add a separate durable local pin only if stale shared originals need reclamation.
+                    if (!capture.optBoolean("localRequired") && capture.optBoolean("cloudOnly"))
+                        Files.deleteIfExists(Path.of(capture.getString("target")));
+                } catch (IOException | RuntimeException retained) { removed = false; }
+            }
+        } catch (IOException ignored) { removed = false; }
+        return removed;
+    }
+
+    private static boolean hasManagedScratches(Path folder) {
+        Path scratch = folder.resolve(SCRATCH_DIR);
+        if (!Files.isDirectory(scratch)) return false;
+        try (Stream<Path> files = Files.walk(scratch)) {
+            return files.anyMatch(path -> path.getFileName().toString().equals("capture.json"));
+        } catch (IOException error) { return true; }
     }
 
     private static boolean ownerMayBeRunning(Path folder) {
@@ -188,14 +227,21 @@ final class CrashSweep {
         //    holds the last bufferSeconds of footage; mostly noise for clean
         //    drain-timeout cases (ring content is "moment of close") but
         //    cheap and consistent.
-        Path crashRecording = trySalvageRing(claimedFolder, ffmpegExe, mode,
-                logDir, sessionId, appDataRoot);
+        Path crashRecording = hasCloudOnlyRing(appDataRoot, sessionId)
+                ? null : trySalvageRing(claimedFolder, ffmpegExe, mode, logDir, sessionId, appDataRoot);
 
         if (!recoveredClips.isEmpty() || crashRecording != null) {
             Path summaryDir = crashRecording != null ? crashRecording.getParent()
                     : recoveredClips.get(0).getParent();
             appendCrashLog(summaryDir, meta, crashRecording, recoveredClips);
         }
+    }
+
+    private static boolean hasCloudOnlyRing(Path appDataRoot, String sessionId) {
+        Path reservation = appDataRoot.resolve("cloud-capture-admission").resolve(sessionId + ".json");
+        if (!Files.isRegularFile(reservation)) return false;
+        try { return new JSONObject(Files.readString(reservation)).optLong("ring") > 0; }
+        catch (IOException | RuntimeException unknown) { return true; }
     }
 
     /**
@@ -237,12 +283,12 @@ final class CrashSweep {
         if (!Files.isDirectory(scratchRoot)) {
             return List.of();
         }
-        if (logDir == null) {
+        if (logDir == null && !hasManagedScratches(claimedFolder)) {
             LOGGER.info("Session {} has pending scratches but original logDir is gone; "
                     + "nothing useful to recover (HTML log is also missing)", sessionId);
             return List.of();
         }
-        Path clipsDir = logDir.resolve(CLIPS_DIR);
+        Path clipsDir = logDir == null ? claimedFolder.resolve(CLIPS_DIR) : logDir.resolve(CLIPS_DIR);
         try {
             Files.createDirectories(clipsDir);
         } catch (IOException e) {
@@ -255,6 +301,11 @@ final class CrashSweep {
         try (Stream<Path> dirs = Files.list(scratchRoot)) {
             dirs.filter(Files::isDirectory).forEach(scratchDir -> {
                 String errorUuid = scratchDir.getFileName().toString();
+                Path captureFile = scratchDir.resolve("capture.json");
+                if (Files.isRegularFile(captureFile)) {
+                    recoverMediaScratch(scratchDir, captureFile, ffmpegExe, mode, recovered);
+                    return;
+                }
                 Path target = clipsDir.resolve(errorUuid + ".mp4");
                 if (Files.exists(target)) {
                     LOGGER.debug("Skipping already-recovered clip {} for session {}",
@@ -277,6 +328,32 @@ final class CrashSweep {
             LOGGER.debug("Could not list scratches under {}: {}", scratchRoot, e.toString());
         }
         return recovered;
+    }
+
+    private static void recoverMediaScratch(Path scratch, Path metadata, Path ffmpeg, EncodingMode mode,
+                                            List<Path> recovered) {
+        try {
+            JSONObject capture = new JSONObject(Files.readString(metadata));
+            Path target = Path.of(capture.getString("target"));
+            // An existing target is not proof that the interrupted finalizer returned.
+            ClipFinalizer.encodeSegmentsToMp4(ffmpeg, scratch, target, mode,
+                    capture.optBoolean("cloudOnly") ? 8L * 1024 * 1024 : Long.MAX_VALUE);
+            if (!HeliosMediaOutbox.captureFinished(capture.getString("captureId"), target, null)) return;
+            recovered.add(target);
+            if (!capture.optBoolean("localRequired") && capture.optBoolean("cloudOnly")) Files.deleteIfExists(target);
+            ScreenRecorder.deleteRecursivelyQuietly(scratch);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        } catch (IOException failure) {
+            try {
+                JSONObject capture = new JSONObject(Files.readString(metadata));
+                if (HeliosMediaOutbox.captureFinished(capture.getString("captureId"), null,
+                        failure instanceof ClipFinalizer.TooLargeException ? "tooLarge" : "encodeFailed"))
+                    ScreenRecorder.deleteRecursivelyQuietly(scratch);
+            } catch (IOException | RuntimeException retained) { }
+        } catch (RuntimeException damaged) {
+            // Keep unrecognized ownership metadata for inspection; never attach its ring to another row.
+        }
     }
 
     /**

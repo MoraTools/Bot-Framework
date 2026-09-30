@@ -1,7 +1,6 @@
 package com.automationanywhere.botcommand.utilities.logger;
 
 import com.automationanywhere.botcommand.data.Value;
-import org.apache.commons.io.IOUtils;
 import org.apache.commons.text.StringEscapeUtils;
 import org.apache.logging.log4j.core.Layout;
 import org.apache.logging.log4j.core.LogEvent;
@@ -12,31 +11,35 @@ import org.apache.logging.log4j.core.config.plugins.PluginBuilderFactory;
 import org.apache.logging.log4j.core.layout.AbstractStringLayout;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.InetAddress;
 import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.UUID;
 
 /**
  * @author Sumit Kumar
  */
 @Plugin(name = "CustomHTMLLayout", category = Node.CATEGORY, elementType = Layout.ELEMENT_TYPE, printObject = true)
 public class CustomHTMLLayout extends AbstractStringLayout {
-    private static final byte[] footer = ("</tbody></table></body></html>").getBytes();
+    static final String FORMAT_MARKER = "<!-- a360-log-format:3 -->";
+    static final String HEADER_END = "<!-- a360-log-header:end -->\n";
+    static final String ENTRY_END = "<!-- a360-log-entry:end -->\n";
     private static final String templatePath = "/templates/log.html";
     private static final byte[] header;
     private static final String machine;
     private static final String user;
 
     static {
-        try {
-            header =
-                    IOUtils.toByteArray(Objects.requireNonNull(CustomHTMLLayout.class.getResourceAsStream(templatePath)));
+        try (InputStream template = Objects.requireNonNull(CustomHTMLLayout.class.getResourceAsStream(templatePath))) {
+            // Normalize marker newlines and omit static-template indentation to reduce file size.
+            header = new String(template.readAllBytes(), StandardCharsets.UTF_8)
+                    .replace("\r\n", "\n").replaceAll("(?m)^ +", "").getBytes(StandardCharsets.UTF_8);
             machine = InetAddress.getLocalHost().getHostName();
             user = System.getProperty("user.name");
         } catch (IOException e) {
@@ -80,7 +83,7 @@ public class CustomHTMLLayout extends AbstractStringLayout {
         String formattedContent;
         String message;
         String sourceBotPath = "";
-        String variablesLink = "";
+        String variablesHTML = "";
         String screenCell = "";
 
         // Parse the message and extract column details for current row
@@ -96,37 +99,9 @@ public class CustomHTMLLayout extends AbstractStringLayout {
             String videoPosterPath =
                     Optional.ofNullable(messageObject.get(Columns.VIDEO_POSTER)).map(Object::toString).orElse("");
 
-            // Process variables if present
-            if (messageObject.get(Columns.VARIABLES) != null && messageObject.get(Columns.VARIABLES) instanceof Map) {
-                Map<String, Value> variableMap = (Map<String, Value>) messageObject.get(Columns.VARIABLES);
-
-                // Generate count display for the main log
-                String variablesCount = HTMLGenerator.generateHTML(variableMap);
-
-                // If the variables folder path is provided, generate a separate file
-                if (messageObject.get("variablesFolderPath") != null) {
-                    String variablesFolderPath = messageObject.get("variablesFolderPath").toString();
-                    String logEventId = UUID.randomUUID().toString();
-
-                    // Generate variable file and get the link
-                    String variablesFilePath = HTMLGenerator.generateVariableFile(variableMap, variablesFolderPath,
-                            logEventId);
-
-                    if (!variablesFilePath.isEmpty()) {
-                        // Escape the href for parity with every other dynamic
-                        // attribute in this row. The current filename scheme
-                        // (variables/variables_<UUID>.html) is safe, but a
-                        // future change to include user-supplied content would
-                        // otherwise become a stored-XSS vector.
-                        variablesLink =
-                                "<a href='" + StringEscapeUtils.escapeHtml4(variablesFilePath)
-                                        + "' target='_blank' class='vars-link'>" + variablesCount + "</a>";
-                    } else {
-                        variablesLink = variablesCount;
-                    }
-                } else {
-                    variablesLink = variablesCount;
-                }
+            if (messageObject.get(Columns.VARIABLES) instanceof Map) {
+                variablesHTML = HTMLGenerator.generateVariablesButton(
+                        (Map<String, Value>) messageObject.get(Columns.VARIABLES));
             }
 
             // Render the renamed "Screen" column cell. Video takes priority when present;
@@ -140,24 +115,17 @@ public class CustomHTMLLayout extends AbstractStringLayout {
         String levelClass = "level-" + event.getLevel().toString();
 
         formattedContent = String.format(
-                "<tr>" +
-                        "<td>%s</td>" +
-                        "<td class='%s'>%s</td>" +
-                        "<td>%s</td>" +
-                        "<td class='responsive-hide'>%s</td>" +
-                        "<td class='responsive-hide'>%s</td>" +
-                        "<td class='message-cell'>%s</td>" +
-                        "<td>%s</td>" +
-                        "<td>%s</td>" +
-                        "</tr>",
+                "<tr class='log-entry %s'>"
+                        + "<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+                        + "<td class='message-cell'>%s</td><td>%s</td><td>%s</td></tr>\n" + ENTRY_END,
+                StringEscapeUtils.escapeHtml4(levelClass),
                 StringEscapeUtils.escapeHtml4(formatTimestamp(event.getTimeMillis())),
-                levelClass,
                 StringEscapeUtils.escapeHtml4(event.getLevel().toString()),
                 StringEscapeUtils.escapeHtml4(sourceBotPath),
                 StringEscapeUtils.escapeHtml4(machine),
                 StringEscapeUtils.escapeHtml4(user),
                 HTMLGenerator.escapeWithWhitespaceMarkers(message),
-                variablesLink,
+                variablesHTML,
                 screenCell
         );
 
@@ -166,7 +134,8 @@ public class CustomHTMLLayout extends AbstractStringLayout {
 
     @Override
     public byte[] getFooter() {
-        return footer;
+        // Keep the table open so every completed row remains appendable.
+        return new byte[0];
     }
 
     @Override
@@ -203,7 +172,6 @@ public class CustomHTMLLayout extends AbstractStringLayout {
         public static final String MESSAGE = "Message";
         public static final String VARIABLES = "Variables";
         public static final String SCREENSHOT = "Screenshot";
-        public static final String VARIABLES_FOLDER_PATH = "variablesFolderPath";
         public static final String VIDEO = "Video";
         public static final String VIDEO_POSTER = "VideoPoster";
     }

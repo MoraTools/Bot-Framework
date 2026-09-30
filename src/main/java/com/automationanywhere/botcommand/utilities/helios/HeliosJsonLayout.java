@@ -4,24 +4,14 @@ import com.automationanywhere.botcommand.data.Value;
 import com.automationanywhere.botcommand.utilities.logger.CustomHTMLLayout;
 import com.automationanywhere.botcommand.utilities.logger.HTMLGenerator;
 import org.apache.logging.log4j.Level;
-import org.apache.logging.log4j.core.Layout;
 import org.apache.logging.log4j.core.LogEvent;
-import org.apache.logging.log4j.core.config.Node;
-import org.apache.logging.log4j.core.config.plugins.Plugin;
-import org.apache.logging.log4j.core.config.plugins.PluginBuilderAttribute;
-import org.apache.logging.log4j.core.config.plugins.PluginBuilderFactory;
-import org.apache.logging.log4j.core.layout.AbstractStringLayout;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.nio.charset.Charset;
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -39,8 +29,7 @@ import java.util.regex.Pattern;
  *
  * @author jamir-boop
  */
-@Plugin(name = "HeliosJsonLayout", category = Node.CATEGORY, elementType = Layout.ELEMENT_TYPE, printObject = true)
-public class HeliosJsonLayout extends AbstractStringLayout {
+public class HeliosJsonLayout {
 
     /** Same extraction Helios uses on parsed log files, so streamed rows group identically. */
     private static final Pattern TASK_PATTERN = Pattern.compile("[\\\\/]tasks[\\\\/](.*?)@", Pattern.CASE_INSENSITIVE);
@@ -51,36 +40,7 @@ public class HeliosJsonLayout extends AbstractStringLayout {
     /** Server-side cap on one rendered variable value; longer text is cut and flagged. */
     private static final int MAX_VALUE_CHARS = 8192;
 
-    /** Live layouts by session key; the entry is removed by {@link #consumeStatus(String)}. */
-    private static final Map<String, HeliosJsonLayout> REGISTRY = new ConcurrentHashMap<>();
-
-    private final AtomicLong ordinal = new AtomicLong();
     private final AtomicReference<Level> worst = new AtomicReference<>(Level.INFO);
-    private final String sessionKey;
-
-    public HeliosJsonLayout(Charset charset, String sessionKey) {
-        super(charset == null ? StandardCharsets.UTF_8 : charset);
-        this.sessionKey = sessionKey == null ? "" : sessionKey;
-        if (!this.sessionKey.isEmpty()) {
-            REGISTRY.put(this.sessionKey, this);
-        }
-    }
-
-    @PluginBuilderFactory
-    public static Builder newBuilder() {
-        return new Builder();
-    }
-
-    /**
-     * Removes the layout for {@code sessionKey} and reports the worst level it saw as an
-     * ingest session status.
-     *
-     * @return {@code ERROR}, {@code WARN} or {@code OK}
-     */
-    public static String consumeStatus(String sessionKey) {
-        HeliosJsonLayout layout = REGISTRY.remove(sessionKey);
-        return layout == null ? "OK" : layout.status();
-    }
 
     public String status() {
         Level level = worst.get();
@@ -90,14 +50,9 @@ public class HeliosJsonLayout extends AbstractStringLayout {
         return Level.WARN.equals(level) ? "WARN" : "OK";
     }
 
-    @Override
-    public String getContentType() {
-        return "application/json; charset=" + getCharset().name();
-    }
-
-    @Override
+    /** The appender supplies the ordinal, including entries that fail to reach the journal. */
     @SuppressWarnings("unchecked")
-    public String toSerializable(LogEvent event) {
+    public JSONObject toJson(LogEvent event, int ordinal) {
         String message;
         String source = "";
         String screenPath = "";
@@ -141,9 +96,8 @@ public class HeliosJsonLayout extends AbstractStringLayout {
                 .put("screenPath", screenPath);
 
         return new JSONObject()
-                .put("firstOrdinal", ordinal.getAndIncrement())
-                .put("entries", new JSONArray().put(entry))
-                .toString();
+                .put("firstOrdinal", ordinal)
+                .put("entries", new JSONArray().put(entry));
     }
 
     /**
@@ -186,37 +140,5 @@ public class HeliosJsonLayout extends AbstractStringLayout {
     private static int offsetMinutes(long epochMilli) {
         Instant instant = Instant.ofEpochMilli(epochMilli);
         return ZoneId.systemDefault().getRules().getOffset(instant).getTotalSeconds() / 60;
-    }
-
-    /**
-     * Built reflectively by Log4j2 via the @PluginBuilderFactory entry point.
-     * Static analysis cannot see the framework instantiation.
-     */
-    @SuppressWarnings("unused")
-    public static class Builder implements org.apache.logging.log4j.core.util.Builder<HeliosJsonLayout> {
-
-        @PluginBuilderAttribute
-        private Charset charset;
-
-        @PluginBuilderAttribute
-        private String sessionKey;
-
-        private Builder() {
-        }
-
-        public Builder withCharset(Charset charset) {
-            this.charset = charset;
-            return this;
-        }
-
-        public Builder withSessionKey(String sessionKey) {
-            this.sessionKey = sessionKey;
-            return this;
-        }
-
-        @Override
-        public HeliosJsonLayout build() {
-            return new HeliosJsonLayout(charset, sessionKey);
-        }
     }
 }

@@ -9,9 +9,7 @@ import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
-import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileReader;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
@@ -75,8 +73,6 @@ public class EntryCountWithExistingFileTest {
         int entryCount = countLogEntries(logFilePath);
         Assert.assertEquals(entryCount, entriesToWrite, "Should have exactly " + entriesToWrite + " entries");
 
-        // Verify footer is present and the file is structurally valid
-        Assert.assertTrue(hasFooter(logFilePath), "File should have HTML footer after close");
         assertWellFormedStructure(logFilePath);
 
         System.out.println("✓ Session 1: Created log with " + entryCount + " entries");
@@ -119,14 +115,13 @@ public class EntryCountWithExistingFileTest {
 
         // Verify no duplicate headers
         int headerCount = countHeaders(logFilePath);
-        Assert.assertEquals(headerCount, 1, "Should have exactly one header row");
+        Assert.assertEquals(headerCount, 1, "Should have exactly one document header");
 
         // Verify footer is present and the file is structurally valid.
         // Pre-fix, appending across sessions left the previous session's
         // </tbody></table></body></html> in the middle of the file with
         // new entries orphaned after it. assertWellFormedStructure is the
         // regression guard.
-        Assert.assertTrue(hasFooter(logFilePath), "File should have HTML footer after close");
         assertWellFormedStructure(logFilePath);
 
         System.out.println("✓ Session 2: Appended " + newEntries + " entries, total now " + totalEntries);
@@ -179,9 +174,7 @@ public class EntryCountWithExistingFileTest {
         Assert.assertEquals(newFileEntries, expectedNewFileEntries,
                 "New file should have remaining entries");
 
-        // Verify both files have footers and are structurally valid.
-        Assert.assertTrue(hasFooter(rolledFile.getAbsolutePath()), "Rolled file should have footer");
-        Assert.assertTrue(hasFooter(logFilePath), "New file should have footer");
+        // Verify both files contain complete entries.
         assertWellFormedStructure(rolledFile.getAbsolutePath());
         assertWellFormedStructure(logFilePath);
 
@@ -226,7 +219,6 @@ public class EntryCountWithExistingFileTest {
         int entryCount = countLogEntries(logFilePath);
         Assert.assertEquals(entryCount, entriesToWrite, "Fresh file should have exactly " + entriesToWrite + " entries");
 
-        Assert.assertTrue(hasFooter(logFilePath), "Fresh file should have footer");
         assertWellFormedStructure(logFilePath);
 
         System.out.println("✓ Fresh start: Created log with " + entryCount + " entries");
@@ -295,100 +287,22 @@ public class EntryCountWithExistingFileTest {
         customLogger.close();
     }
 
-    /**
-     * Counts log entries (data rows) in the HTML file by counting <tr><td> patterns
-     */
     private int countLogEntries(String filePath) throws IOException {
-        int count = 0;
-        try (BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                String lowerLine = line.toLowerCase();
-                int index = 0;
-                while ((index = lowerLine.indexOf("<tr><td>", index)) != -1) {
-                    count++;
-                    index += 8;
-                }
-            }
-        }
-        return count;
+        return (int) Files.readString(Paths.get(filePath)).lines()
+                .filter(line -> line.equals("<!-- a360-log-entry:end -->")).count();
     }
 
-    /**
-     * Counts header rows in the HTML file by counting <thead> tags
-     */
     private int countHeaders(String filePath) throws IOException {
-        int count = 0;
-        try (BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                String lowerLine = line.toLowerCase();
-                if (lowerLine.contains("<thead>")) {
-                    count++;
-                }
-            }
-        }
-        return count;
+        return (int) Files.readString(Paths.get(filePath)).lines()
+                .filter(line -> line.equals("<!-- a360-log-format:3 -->")).count();
     }
 
-    /**
-     * Checks if the HTML file has a proper footer
-     */
-    private boolean hasFooter(String filePath) throws IOException {
-        try (BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                String lowerLine = line.toLowerCase();
-                if (lowerLine.contains("</tbody></table></body></html>")) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    /** Counts non-overlapping occurrences of the literal needle (case-insensitive) in the file. */
-    private int countOccurrences(String filePath, String needle) throws IOException {
-        String haystack = new String(java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(filePath)),
-                java.nio.charset.StandardCharsets.UTF_8).toLowerCase();
-        String n = needle.toLowerCase();
-        int count = 0;
-        int idx = 0;
-        while ((idx = haystack.indexOf(n, idx)) >= 0) {
-            count++;
-            idx += n.length();
-        }
-        return count;
-    }
-
-    /** True if any data row tag appears after the last footer in the file. */
-    private boolean hasOrphanRowsAfterFooter(String filePath) throws IOException {
-        String haystack = new String(java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(filePath)),
-                java.nio.charset.StandardCharsets.UTF_8).toLowerCase();
-        int lastFooter = haystack.lastIndexOf("</tbody></table></body></html>");
-        if (lastFooter < 0) {
-            return false;
-        }
-        return haystack.indexOf("<tr><td>", lastFooter) >= 0;
-    }
-
-    /**
-     * Asserts the rendered HTML is structurally well-formed for our log
-     * template: exactly one {@code <table>} opener, exactly one
-     * {@code <tbody>} opener, exactly one trailing footer, and no orphan
-     * data rows after the footer. This is the regression check against the
-     * "stacked footers" bug where a previous session's footer survived
-     * into the next session and new entries were appended outside the
-     * table.
-     */
     private void assertWellFormedStructure(String filePath) throws IOException {
-        Assert.assertEquals(countOccurrences(filePath, "<table>"), 1,
-                "exactly one <table> opener expected in " + filePath);
-        Assert.assertEquals(countOccurrences(filePath, "<tbody>"), 1,
-                "exactly one <tbody> opener expected in " + filePath);
-        Assert.assertEquals(countOccurrences(filePath, "</tbody></table></body></html>"), 1,
-                "exactly one trailing footer expected in " + filePath);
-        Assert.assertFalse(hasOrphanRowsAfterFooter(filePath),
-                "no <tr><td> data rows should appear after the footer in " + filePath);
+        String html = Files.readString(Paths.get(filePath));
+        Assert.assertEquals(countHeaders(filePath), 1, "one document header");
+        Assert.assertTrue(html.endsWith("</tr>\n<!-- a360-log-entry:end -->\n"),
+                "the final entry must be complete");
+        Assert.assertEquals(html.split("<tr class='log-entry ", -1).length - 1, countLogEntries(filePath));
+        Assert.assertFalse(html.contains("</body>"), "no closing footer to trap later entries");
     }
 }

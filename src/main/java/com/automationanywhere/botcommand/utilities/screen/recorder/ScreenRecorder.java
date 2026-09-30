@@ -1,6 +1,9 @@
 package com.automationanywhere.botcommand.utilities.screen.recorder;
 
 import org.apache.logging.log4j.Level;
+import com.automationanywhere.botcommand.utilities.helios.HeliosMediaOutbox;
+import org.json.JSONObject;
+import java.util.function.Consumer;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -25,7 +28,6 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
@@ -133,6 +135,16 @@ public abstract class ScreenRecorder implements AutoCloseable {
                                        int bufferSeconds,
                                        Set<Level> recordingLevels,
                                        EncodingMode encodingMode) {
+        return start(sessionId, logDir, bufferSeconds, recordingLevels, encodingMode, false);
+    }
+
+    public static ScreenRecorder start(String sessionId, Path logDir, int bufferSeconds,
+            Set<Level> recordingLevels, EncodingMode encodingMode, boolean cloudOnly) {
+        return start(sessionId, logDir, bufferSeconds, recordingLevels, encodingMode, cloudOnly, cloudOnly);
+    }
+
+    public static ScreenRecorder start(String sessionId, Path logDir, int bufferSeconds,
+            Set<Level> recordingLevels, EncodingMode encodingMode, boolean cloudOnly, boolean mediaVideoEnabled) {
         if (recordingLevels == null || recordingLevels.isEmpty() || bufferSeconds <= 0) {
             return DISABLED;
         }
@@ -142,7 +154,7 @@ public abstract class ScreenRecorder implements AutoCloseable {
             Path ffmpegExe = FfmpegBinary.locate();
             CrashSweep.scheduleOnce(appDataRoot, ffmpegExe);
             return new RealScreenRecorder(sessionId, logDir, bufferSeconds,
-                    new HashSet<>(recordingLevels), appDataRoot, ffmpegExe, mode);
+                    new HashSet<>(recordingLevels), appDataRoot, ffmpegExe, mode, cloudOnly, mediaVideoEnabled);
         } catch (Throwable t) {
             LOGGER.warn("Screen recorder disabled for session {}: {}",
                     sessionId, t.toString());
@@ -161,7 +173,18 @@ public abstract class ScreenRecorder implements AutoCloseable {
      * encoder queue is full, or the ring has nothing usable yet (e.g. session
      * just started). Callers render a "video unavailable" chip in that case.
      */
-    public abstract Path snapshotForError(String errorUuid);
+    public Path snapshotForError(String errorUuid) {
+        CaptureResult result = snapshotForError(errorUuid, true, ignored -> { });
+        return result.unavailableReason == null ? result.video : null;
+    }
+
+    public abstract CaptureResult snapshotForError(String errorUuid, boolean localRequired,
+                                                   Consumer<CaptureResult> register);
+
+    public static void recoverAtStartup() {
+        try { CrashSweep.scheduleOnce(FfmpegBinary.appDataRoot(), FfmpegBinary.locate()); }
+        catch (Throwable ignored) { }
+    }
 
     @Override
     public abstract void close();
@@ -172,7 +195,11 @@ public abstract class ScreenRecorder implements AutoCloseable {
 
     private static final class Disabled extends ScreenRecorder {
         @Override public boolean shouldRecordFor(Level level) { return false; }
-        @Override public Path snapshotForError(String errorUuid) { return null; }
+        @Override public CaptureResult snapshotForError(String errorUuid, boolean localRequired, Consumer<CaptureResult> register) {
+            CaptureResult result = CaptureResult.unavailable(errorUuid, "videoUnavailable");
+            register.accept(result);
+            return result;
+        }
         @Override public void close() { }
         @Override public boolean isClosed() { return true; }
     }
@@ -188,8 +215,16 @@ public abstract class ScreenRecorder implements AutoCloseable {
         private final Path scratchRoot;
         private final Path activeMarker;
         private final Path ffmpegExe;
+        private final Path appDataRoot;
+        private final boolean cloudOnlyRecorder;
+        private final boolean mediaVideoEnabled;
         private final ProcessGuard guard;
         private final Process stage1Process;
+        private RecorderStorage storage;
+        private Thread storageWatchdog;
+        private volatile boolean storageLimited;
+        private long nativeHeadroom;
+        private final java.util.Map<String, CaptureResult> captures = new java.util.HashMap<>();
         private final ThreadPoolExecutor encoderPool;
         private final AtomicBoolean stopping = new AtomicBoolean(false);
         private final AtomicBoolean failed = new AtomicBoolean(false);
@@ -209,12 +244,25 @@ public abstract class ScreenRecorder implements AutoCloseable {
                            Path appDataRoot,
                            Path ffmpegExe,
                            EncodingMode encodingMode) throws IOException {
+            this(sessionId, logDir, bufferSeconds, recordingLevels, appDataRoot, ffmpegExe, encodingMode, false);
+        }
+
+        RealScreenRecorder(String sessionId, Path logDir, int bufferSeconds, Set<Level> recordingLevels,
+                Path appDataRoot, Path ffmpegExe, EncodingMode encodingMode, boolean cloudOnly) throws IOException {
+            this(sessionId, logDir, bufferSeconds, recordingLevels, appDataRoot, ffmpegExe, encodingMode, cloudOnly, cloudOnly);
+        }
+
+        RealScreenRecorder(String sessionId, Path logDir, int bufferSeconds, Set<Level> recordingLevels,
+                Path appDataRoot, Path ffmpegExe, EncodingMode encodingMode, boolean cloudOnly, boolean mediaVideoEnabled) throws IOException {
             this.sessionId = sessionId;
             this.logDir = logDir;
             this.bufferSeconds = bufferSeconds;
             this.recordingLevels = recordingLevels;
             this.encodingMode = encodingMode;
             this.ffmpegExe = ffmpegExe;
+            this.appDataRoot = appDataRoot;
+            this.cloudOnlyRecorder = cloudOnly;
+            this.mediaVideoEnabled = mediaVideoEnabled;
 
             this.sessionFolder = appDataRoot.resolve("sessions").resolve(sessionId);
             this.ringDir = sessionFolder.resolve("ring");
@@ -227,14 +275,21 @@ public abstract class ScreenRecorder implements AutoCloseable {
             writeMeta();
             createMarker();
 
+            if (cloudOnly) {
+                java.awt.Dimension screen = java.awt.Toolkit.getDefaultToolkit().getScreenSize();
+                nativeHeadroom = Math.addExact(Math.multiplyExact((long) screen.width * screen.height, 8L), 1024L * 1024);
+                storage = new RecorderStorage(appDataRoot, sessionId);
+            }
             this.guard = new ProcessGuard();
             try {
                 this.stage1Process = guard.spawn(buildStage1Command(), null);
             } catch (IOException e) {
                 guard.close();
+                if (storage != null) storage.close();
                 throw e;
             }
             startStderrWatchdog();
+            if (storage != null) startStorageWatchdog();
             this.encoderPool = newEncoderPool(sessionId);
             awaitWarmup();
         }
@@ -360,6 +415,36 @@ public abstract class ScreenRecorder implements AutoCloseable {
             };
         }
 
+        private void startStorageWatchdog() {
+            // Reserve headroom for two native frames and muxer buffers. Windows overshoot is a release gate.
+            long stopAt = RecorderStorage.RING_BYTES - nativeHeadroom;
+            storageWatchdog = new Thread(() -> {
+                while (!stopping.get() && stage1Process.isAlive()) {
+                    try {
+                        long bytes = 0;
+                        try (Stream<Path> files = Files.list(ringDir)) {
+                            for (Path path : files.filter(Files::isRegularFile).collect(java.util.stream.Collectors.toList()))
+                                bytes = Math.addExact(bytes, Files.size(path));
+                        }
+                        if (stopAt <= 0 || bytes >= stopAt) {
+                            storageLimited = true;
+                            failed.set(true);
+                            stage1Process.destroyForcibly();
+                            return;
+                        }
+                        Thread.sleep(100);
+                    } catch (IOException | RuntimeException error) {
+                        storageLimited = true;
+                        failed.set(true);
+                        stage1Process.destroyForcibly();
+                        return;
+                    } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); return; }
+                }
+            }, "a360-cloud-capture-budget-" + shortId(sessionId));
+            storageWatchdog.setDaemon(true);
+            storageWatchdog.start();
+        }
+
         private void startStderrWatchdog() {
             Thread t = new Thread(this::pumpStderr,
                     "a360-recorder-stderr-" + shortId(sessionId));
@@ -397,75 +482,189 @@ public abstract class ScreenRecorder implements AutoCloseable {
         }
 
         @Override
-        public Path snapshotForError(String errorUuid) {
-            if (closed.get() || failed.get()) {
-                return null;
-            }
-            // Dedup at 1-second granularity (DEDUP_CHUNK_MILLIS, aligned with
-            // SEGMENT_TIME_SECONDS). Two warnings inside the same chunk would
-            // produce byte-identical clips - same stable ring segments - so
-            // returning the cached path here saves a ring->scratch copy on the
-            // bot thread and keeps the encoder queue from filling on tight
-            // loops. Cross-level: any prior call within the chunk wins
-            // regardless of which level fired it.
+        public synchronized CaptureResult snapshotForError(String errorUuid, boolean localRequired,
+                                                          Consumer<CaptureResult> register) {
+            if (closed.get() || failed.get()) return unavailable(errorUuid, storageLimited ? "storageBudget" : "videoUnavailable", register);
             long chunkId = System.currentTimeMillis() / DEDUP_CHUNK_MILLIS;
             DedupSlot slot = dedupSlot.get();
-            if (slot.chunkId == chunkId && slot.clipPath != null) {
-                return slot.clipPath;
+            if (slot.chunkId == chunkId && slot.capture != null) {
+                CaptureResult capture = slot.capture;
+                if (localRequired) capture.localRequired.set(true);
+                boolean ownershipSaved = true;
+                if (capture.mediaManaged || mediaVideoEnabled || !localRequired) {
+                    if (!persistCaptureOwner(capture)) {
+                        ownershipSaved = false;
+                        capture.mediaFailure = "storageFailure";
+                        if (!localRequired) return unavailable(capture.captureId, "storageFailure", register);
+                        // A media-sidecar fault must not cancel the requested local owner.
+                        if (capture.mediaManaged) HeliosMediaOutbox.captureFinished(capture.captureId, null, "storageFailure");
+                    } else {
+                        capture.mediaManaged = true;
+                        capture.mediaFailure = null;
+                    }
+                }
+                if (localRequired && ownershipSaved && !cloudOnlyRecorder && capture.cloudScratchReserved) {
+                    storage.release("capture-" + capture.captureId);
+                    capture.cloudScratchReserved = false;
+                }
+                register.accept(capture);
+                return capture;
             }
+            // Completed cloud-only originals stay until every durable owner has copied them.
+            java.util.Iterator<java.util.Map.Entry<String, CaptureResult>> completed = captures.entrySet().iterator();
+            while (completed.hasNext()) {
+                CaptureResult capture = completed.next().getValue();
+                if (capture.localRequired.get() || !capture.completion.isDone() || Files.isDirectory(capture.scratch)) continue;
+                try {
+                    Files.deleteIfExists(capture.video);
+                    Files.deleteIfExists(sessionFolder.resolve("captures").resolve(capture.captureId + ".json"));
+                    if (storage != null) storage.release("capture-" + capture.captureId);
+                    completed.remove();
+                } catch (IOException pendingDelete) { }
+            }
+            Path scratchDir = scratchRoot.resolve(errorUuid);
+            CaptureResult created = null;
+            boolean registered = false;
             try {
                 List<Path> segments = stableSegments();
-                if (segments.isEmpty()) {
-                    return null;   // session too young, no usable footage yet
+                if (segments.isEmpty() || encoderPool.getQueue().remainingCapacity() == 0)
+                    return unavailable(errorUuid, "videoUnavailable", register);
+                boolean cloudOwned = !localRequired;
+                if (cloudOwned && storage == null) {
+                    try { storage = new RecorderStorage(appDataRoot, sessionId, 0); }
+                    catch (IOException unavailable) { return unavailable(errorUuid, "storageFailure", register); }
                 }
-
-                Path scratchDir = scratchRoot.resolve(errorUuid);
+                java.util.Map<Path, Long> admittedSizes = new java.util.HashMap<>();
+                if (cloudOwned) {
+                    long bytes = cloudOnlyRecorder ? 8L * 1024 * 1024 + nativeHeadroom : 0;
+                    for (Path seg : segments) {
+                        long size = Files.size(seg);
+                        admittedSizes.put(seg, size);
+                        bytes = Math.addExact(bytes, size);
+                    }
+                    if (!storage.reserve("capture-" + errorUuid, bytes)) return unavailable(errorUuid, "storageBudget", register);
+                }
                 Files.createDirectories(scratchDir);
                 for (Path seg : segments) {
-                    Files.copy(seg, scratchDir.resolve(seg.getFileName()),
-                            StandardCopyOption.COPY_ATTRIBUTES,
-                            StandardCopyOption.REPLACE_EXISTING);
+                    if (!cloudOwned) Files.copy(seg, scratchDir.resolve(seg.getFileName()),
+                            StandardCopyOption.COPY_ATTRIBUTES, StandardCopyOption.REPLACE_EXISTING);
+                    else copyAdmittedSegment(seg, scratchDir.resolve(seg.getFileName()), admittedSizes.get(seg));
                 }
-
-                Path targetMp4 = logDir.resolve("clips").resolve(errorUuid + ".mp4");
-                try {
-                    encoderPool.execute(() -> runEncode(scratchDir, targetMp4));
-                    dedupSlot.set(new DedupSlot(chunkId, targetMp4));
-                    return targetMp4;
-                } catch (RejectedExecutionException rejected) {
-                    // Queue is at capacity (ENCODER_QUEUE_CAPACITY) or the pool
-                    // was shut down between our closed-check and submit. Either
-                    // way the snapshot won't encode; clean up scratch and let
-                    // the caller render a "video unavailable" indicator.
+                Path target = logDir.resolve("clips").resolve(errorUuid + ".mp4");
+                CaptureResult capture = new CaptureResult(errorUuid, target, scratchDir, null);
+                created = capture;
+                capture.localRequired.set(localRequired);
+                capture.cloudScratchReserved = cloudOwned;
+                capture.mediaManaged = mediaVideoEnabled || cloudOwned;
+                if (capture.mediaManaged && !persistCaptureOwner(capture)) {
+                    capture.mediaFailure = "storageFailure";
+                    if (!localRequired) {
+                        deleteRecursivelyQuietly(scratchDir);
+                        if (storage != null && !Files.exists(scratchDir)) storage.release("capture-" + errorUuid);
+                        return unavailable(errorUuid, "storageFailure", register);
+                    }
+                    capture.mediaManaged = false;
+                }
+                if (capture.mediaManaged || cloudOwned) captures.put(errorUuid, capture);
+                // Persist each caller's exact row identity before the encoder can complete.
+                register.accept(capture);
+                registered = true;
+                encoderPool.execute(() -> runEncode(capture));
+                dedupSlot.set(new DedupSlot(chunkId, target, capture));
+                return capture;
+            } catch (IOException | RejectedExecutionException error) {
+                String reason = error instanceof RejectedExecutionException ? "videoUnavailable" : "captureFailed";
+                boolean durable = !registered || !created.mediaManaged || HeliosMediaOutbox.captureFinished(errorUuid, null, reason);
+                if (registered) {
+                    created.unavailableReason = reason;
+                    created.completion.complete(null);
+                }
+                if (durable) {
                     deleteRecursivelyQuietly(scratchDir);
-                    LOGGER.debug("Encoder pool rejected task for session {} ({})",
-                            sessionId, errorUuid);
-                    return null;
+                    if (storage != null && !Files.exists(scratchDir)) storage.release("capture-" + errorUuid);
+                    captures.remove(errorUuid);
+                    try { Files.deleteIfExists(sessionFolder.resolve("captures").resolve(errorUuid + ".json")); }
+                    catch (IOException retained) { }
                 }
-            } catch (IOException e) {
-                LOGGER.warn("snapshotForError({}) failed for session {}: {}",
-                        errorUuid, sessionId, e.toString());
-                return null;
+                LOGGER.warn("snapshotForError({}) failed for session {}: {}", errorUuid, sessionId, error.toString());
+                return registered ? created : unavailable(errorUuid, reason, register);
             }
         }
 
-        /**
-         * Encoder task body. Runs on a worker thread of {@link #encoderPool}.
-         * Always cleans up its scratch dir; if interrupted via shutdownNow
-         * the scratch dir is left behind for next-startup CrashSweep.
-         */
-        private void runEncode(Path scratchDir, Path targetMp4) {
-            try {
-                ClipFinalizer.encodeSegmentsToMp4(ffmpegExe, scratchDir, targetMp4, encodingMode);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                LOGGER.debug("Encode interrupted for {}; scratch left for next-startup sweep",
-                        targetMp4);
-                return;   // skip scratch cleanup; CrashSweep will do it
-            } catch (Throwable t) {
-                LOGGER.warn("Failed to finalize clip {}: {}", targetMp4, t.toString());
+        private static void copyAdmittedSegment(Path source, Path target, long bytes) throws IOException {
+            java.nio.file.attribute.FileTime timestamp = Files.getLastModifiedTime(source);
+            try (java.io.InputStream input = Files.newInputStream(source);
+                 java.io.OutputStream output = Files.newOutputStream(target)) {
+                byte[] buffer = new byte[8192];
+                long remaining = bytes;
+                while (remaining > 0) {
+                    int count = input.read(buffer, 0, (int) Math.min(buffer.length, remaining));
+                    if (count < 0) throw new IOException("Ring segment changed during snapshot");
+                    output.write(buffer, 0, count);
+                    remaining -= count;
+                }
             }
-            deleteRecursivelyQuietly(scratchDir);
+            Files.setLastModifiedTime(target, timestamp);
+        }
+
+        private CaptureResult unavailable(String id, String reason, Consumer<CaptureResult> register) {
+            CaptureResult capture = CaptureResult.unavailable(id, reason);
+            register.accept(capture);
+            return capture;
+        }
+
+        private boolean persistCaptureOwner(CaptureResult capture) {
+            if (capture.scratch == null) return true;
+            try {
+                String metadata = new JSONObject().put("captureId", capture.captureId)
+                        .put("target", capture.video.toAbsolutePath().toString())
+                        .put("localRequired", capture.localRequired.get()).put("cloudOnly", cloudOnlyRecorder).toString();
+                if (Files.isDirectory(capture.scratch)) writeCapture(capture.scratch.resolve("capture.json"), metadata);
+                Path capturesDir = sessionFolder.resolve("captures");
+                Files.createDirectories(capturesDir);
+                writeCapture(capturesDir.resolve(capture.captureId + ".json"), metadata);
+                return true;
+            } catch (IOException error) {
+                LOGGER.warn("Could not persist capture ownership for {}", capture.captureId);
+                return false;
+            }
+        }
+
+        private static void writeCapture(Path path, String metadata) throws IOException {
+            Path part = path.resolveSibling(path.getFileName() + ".tmp");
+            Files.writeString(part, metadata);
+            try (java.nio.channels.FileChannel file = java.nio.channels.FileChannel.open(part, java.nio.file.StandardOpenOption.WRITE)) {
+                file.force(true);
+            }
+            try { Files.move(part, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING); }
+            catch (java.nio.file.AtomicMoveNotSupportedException unsupported) { Files.move(part, path, StandardCopyOption.REPLACE_EXISTING); }
+        }
+
+        private void runEncode(CaptureResult capture) {
+            try {
+                ClipFinalizer.encodeSegmentsToMp4(ffmpegExe, capture.scratch, capture.video, encodingMode,
+                        cloudOnlyRecorder ? 8L * 1024 * 1024 : Long.MAX_VALUE);
+                // Publish only after the finalizer has returned, never from file existence or size.
+                boolean durable = !capture.mediaManaged || HeliosMediaOutbox.captureFinished(capture.captureId,
+                        capture.mediaFailure == null ? capture.video : null, capture.mediaFailure);
+                capture.completion.complete(capture.video);
+                if (!durable) return;
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return; // Preserve the exact scratch and intent for CrashSweep.
+            } catch (Throwable failure) {
+                LOGGER.warn("Failed to finalize clip {}: {}", capture.video, failure.toString());
+                String reason = capture.mediaFailure != null ? capture.mediaFailure
+                        : failure instanceof ClipFinalizer.TooLargeException ? "tooLarge" : "encodeFailed";
+                boolean durable = !capture.mediaManaged || HeliosMediaOutbox.captureFinished(capture.captureId, null, reason);
+                capture.completion.complete(null);
+                if (!durable) return;
+            }
+            deleteRecursivelyQuietly(capture.scratch);
+            if (!cloudOnlyRecorder && capture.cloudScratchReserved && !Files.exists(capture.scratch)) {
+                storage.release("capture-" + capture.captureId);
+                capture.cloudScratchReserved = false;
+            }
         }
 
         /**
@@ -475,24 +674,11 @@ public abstract class ScreenRecorder implements AutoCloseable {
          * stage-2's concat demuxer.
          */
         private List<Path> stableSegments() throws IOException {
-            try (Stream<Path> stream = Files.list(ringDir)) {
-                List<Path> all = stream
-                        .filter(p -> p.getFileName().toString().toLowerCase().endsWith(".mov"))
-                        .sorted(Comparator.comparingLong(this::mtimeOrZero))
-                        .collect(Collectors.toList());
-                if (all.size() <= 1) {
-                    return java.util.Collections.emptyList();
-                }
-                return new java.util.ArrayList<>(all.subList(0, all.size() - 1));
+            List<Path> all = ClipFinalizer.listMovFilesByMtimeAsc(ringDir);
+            if (all.size() <= 1) {
+                return java.util.Collections.emptyList();
             }
-        }
-
-        private long mtimeOrZero(Path p) {
-            try {
-                return Files.getLastModifiedTime(p).toMillis();
-            } catch (IOException e) {
-                return 0L;
-            }
+            return new java.util.ArrayList<>(all.subList(0, all.size() - 1));
         }
 
         /**
@@ -520,11 +706,12 @@ public abstract class ScreenRecorder implements AutoCloseable {
          * The HTML's broken video links self-heal on the next bot run.
          */
         @Override
-        public void close() {
+        public synchronized void close() {
             if (!closed.compareAndSet(false, true)) {
                 return;
             }
             stopping.set(true);
+            if (storageWatchdog != null) storageWatchdog.interrupt();
             stopStage1();
             encoderPool.shutdown();
             boolean drained = false;
@@ -542,13 +729,28 @@ public abstract class ScreenRecorder implements AutoCloseable {
                         CLOSE_DRAIN_TIMEOUT, sessionId, sessionFolder);
             }
             guard.close();
-            if (drained) {
-                deleteRecursivelyQuietly(sessionFolder);
+            if (drained && !hasPendingScratches()) {
+                boolean removed = true;
+                for (CaptureResult capture : captures.values()) {
+                    if (!capture.localRequired.get()) {
+                        try { Files.deleteIfExists(capture.video); }
+                        catch (IOException pendingDelete) { removed = false; }
+                    }
+                }
+                if (removed) {
+                    deleteRecursivelyQuietly(sessionFolder);
+                    if (storage != null && !Files.exists(sessionFolder)) storage.close();
+                }
             }
             // If !drained, leave sessionFolder (session.active marker, ring/,
             // scratch/<uuid>/) on disk. CrashSweep on the next JVM start will
             // claim it, re-encode each pending scratch into <logDir>/clips/,
             // and remove the residual folder.
+        }
+
+        private boolean hasPendingScratches() {
+            try (Stream<Path> folders = Files.list(scratchRoot)) { return folders.anyMatch(Files::isDirectory); }
+            catch (IOException error) { return true; }
         }
 
         private void stopStage1() {
@@ -584,12 +786,14 @@ public abstract class ScreenRecorder implements AutoCloseable {
      * atomically. Immutable; constructed once per successful snapshot.
      */
     private static final class DedupSlot {
-        static final DedupSlot EMPTY = new DedupSlot(Long.MIN_VALUE, null);
+        static final DedupSlot EMPTY = new DedupSlot(Long.MIN_VALUE, null, null);
 
         final long chunkId;
         final Path clipPath;
+        final CaptureResult capture;
 
-        DedupSlot(long chunkId, Path clipPath) {
+        DedupSlot(long chunkId, Path clipPath, CaptureResult capture) {
+            this.capture = capture;
             this.chunkId = chunkId;
             this.clipPath = clipPath;
         }

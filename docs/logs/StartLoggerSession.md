@@ -54,6 +54,8 @@
 * **Description:** The maximum number of log entries written to a single log file before it is rolled over (archived and a new one started).
 * **Constraints:** Must be a number greater than 0.
 
+Variable tables do not add to the entry count. Complete logs remain appendable across sessions. An old-format or incomplete active file is moved intact to the next numbered archive before a fresh log is opened. Existing archives and old variable pages remain unchanged. If that move fails, session startup reports an error instead of altering the existing file.
+
 ### Screen recording
 
 * **Type:** `Select`
@@ -100,14 +102,17 @@
   * `Compact: smaller files, slower encoding`: AV1 (libaom, cpu-used 8). Each clip encodes in ~5-15 s and lands at ~1-3 MB. Choose this when long-term clip storage matters more than encode latency.
 * **Default:** `Fast`
 
-### Helios Cloud streaming
+## Helios Cloud streaming
 
 * **Type:** `Select`
 * **Options:**
   * `Disabled`: The session writes the HTML log only. Nothing leaves the runner.
   * `Enabled`: Every entry of this session is also streamed to a Helios Cloud server while the bot runs.
 * **Default:** `Disabled`
-* **Description:** Streaming is additive. The HTML log, screenshots, video clips and rollover behave exactly the same whether streaming is on or off.
+* **Description:** Every ERROR uploads media that inherits Screen recording. Capture rolling video with ERROR checked
+  uploads the local ERROR clip and a separate screenshot. No video, ERROR unchecked, or disabled recording uploads
+  a screenshot. INFO/WARN recording flags affect local clips only. Local HTML and returned screenshot paths keep
+  their current behavior.
 
 ### Helios Cloud URL
 
@@ -127,9 +132,17 @@
 
 When streaming is enabled the action creates a local disk journal. A background sender opens the remote session and posts batches while the bot runs.
 
-* **Session start** `POST {url}/api/ingest/sessions` with the execution id, bot URI, master Task Bot URI, Control Room file id, machine, user, local start time and the UTC offset in minutes. Helios Cloud identifies the bot by its master Task Bot, so both URIs are sent: `botUri` is the bot that opened the logger session and `parentBotUri` is the master that started the run, empty when the logger runs in the master itself. The Control Room file id is read from the master URI when it carries one, otherwise from the bot URI. The execution id comes from the bot agent; a random UUID is used when it is not available.
-* **Entries** `POST {url}/api/ingest/sessions/{id}/entries`, one envelope per entry, carrying the same timestamp, level, source, task, machine, user, message, variable count and screenshot/clip path that the HTML row shows. Screenshots and clips stay on the runner; only their path is sent.
+* **Session start** `POST {url}/api/ingest/sessions` with the execution id, stable logger-session UUID, bot URI, master Task Bot URI, Control Room file id, machine, user, local start time and the UTC offset in minutes. Helios Cloud identifies the bot by its master Task Bot, so both URIs are sent: `botUri` is the bot that opened the logger session and `parentBotUri` is the master that started the run, empty when the logger runs in the master itself. The Control Room file id is read from the master URI when it carries one, otherwise from the bot URI. The execution id comes from the bot agent; a random UUID is used when it is not available.
+* **Entries** `POST {url}/api/ingest/sessions/{id}/entries`, one envelope per entry, carrying the same timestamp, level, source, task, machine, user, message, variable count and screenshot/clip path that the HTML row shows. Every ERROR also declares media: video and a screenshot when ERROR recording is active, otherwise a screenshot. Local media paths remain in the row.
 * **Session end** `POST {url}/api/ingest/sessions/{id}/end`, sent by `Stop Logger Session`.
+
+**Inherited ERROR media.** There is no separate media selector. A requested ERROR video uses the existing
+5-90 second buffer and FAST/COMPACT codec. No video does not start another recorder. Failed capture or encoding
+preserves the ERROR row and reports unavailable media. Video keeps its independent poster, including when the
+ring is empty, the queue is full, encoding fails, or the clip exceeds 8 MiB. PNG/JPEG limit: 1 MiB. Video retention:
+3 days. Screenshot retention: 14 days. Storage limits can remove media sooner. The runner does not encode a second
+video. A later Helios-enabled session with the same URL/key retries pending media even when No video is selected
+or ERROR recording is unchecked. JSON `/end` and media delivery remain independent.
 
 **Failure behaviour.** HTML logging continues during network or disk failures. Saved journals retry at a later logger startup. See [delivery, retries and configurable disk limits](../../README.md#failure-behaviour).
 
@@ -153,3 +166,5 @@ Throws `BotCommandException` if:
 If the screen recorder fails to start (for example, when running headless or when the bundled ffmpeg cannot extract), the session degrades silently to the existing screenshot-only path rather than failing the bot.
 
 Helios Cloud streaming never raises `BotCommandException`. Any ingest failure is reported as a single WARN row in the HTML log.
+
+Children that use an inherited Logger Session share its identity and ordinal counter. A new Start Logger Session in a child creates a separate stream under the same AA execution.

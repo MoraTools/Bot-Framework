@@ -132,7 +132,7 @@ public class EntryCountRotationTest {
         String screenshotsDir = baseTestPath + "screenshots";
         String variablesDir = baseTestPath + "variables";
         Assert.assertTrue(Files.exists(Paths.get(screenshotsDir)), "Screenshots directory should be created");
-        Assert.assertTrue(Files.exists(Paths.get(variablesDir)), "Variables directory should be created");
+        Assert.assertFalse(Files.exists(Paths.get(variablesDir)), "Variables stay inside the log");
 
         // Log more entries than the limit to trigger rotation
         for (int i = 1; i <= 10; i++) {
@@ -189,7 +189,7 @@ public class EntryCountRotationTest {
         String screenshotsDir = multiLevelPath + "screenshots";
         String variablesDir = multiLevelPath + "variables";
         Assert.assertTrue(Files.exists(Paths.get(screenshotsDir)), "Screenshots directory should be created for multi-level");
-        Assert.assertTrue(Files.exists(Paths.get(variablesDir)), "Variables directory should be created for multi-level");
+        Assert.assertFalse(Files.exists(Paths.get(variablesDir)), "Multi-level logs keep variables inline");
 
         // Log to different levels with proper LogMessage.action()
         for (int i = 1; i <= 5; i++) {
@@ -264,7 +264,7 @@ public class EntryCountRotationTest {
         String screenshotsDir = richContentPath + "screenshots";
         String variablesDir = richContentPath + "variables";
         Assert.assertTrue(Files.exists(Paths.get(screenshotsDir)), "Screenshots directory should exist");
-        Assert.assertTrue(Files.exists(Paths.get(variablesDir)), "Variables directory should exist");
+        Assert.assertFalse(Files.exists(Paths.get(variablesDir)), "Variables stay inside each log entry");
 
         // Log entries with rich content - all with screenshots and variables
         for (int i = 1; i <= 6; i++) {
@@ -294,7 +294,7 @@ public class EntryCountRotationTest {
         Assert.assertTrue(rotation2.exists(), "Second rotation file (2_" + baseName + "." + ext + ") should exist");
 
         // Verify HTML content structure is maintained
-        String originalContent = new String(Files.readAllBytes(originalFile.toPath()));
+        String originalContent = CompressedSnapshots.expand(new String(Files.readAllBytes(originalFile.toPath())));
         Assert.assertTrue(originalContent.contains("class='img-link'"),
             "Screenshot references should be preserved");
         Assert.assertTrue(originalContent.contains("<img"), "Screenshot thumbnail image should be preserved");
@@ -302,8 +302,8 @@ public class EntryCountRotationTest {
         Assert.assertTrue(originalContent.contains("decoding='async'"), "Screenshot image should decode asynchronously");
         Assert.assertTrue(originalContent.contains("width='88'"), "Screenshot image should reserve thumbnail width");
         Assert.assertTrue(originalContent.contains("height='50'"), "Screenshot image should reserve thumbnail height");
-        Assert.assertTrue(originalContent.contains("Variables") || originalContent.contains("vars-link"),
-            "Variable references should be preserved");
+        Assert.assertTrue(originalContent.contains("class='entry-variables'"),
+            "Inline variables should be preserved");
 
         // Check that actual screenshot files were created
         File screenshotDirectory = new File(screenshotsDir);
@@ -311,11 +311,9 @@ public class EntryCountRotationTest {
         Assert.assertNotNull(screenshots, "Screenshot directory should contain files");
         Assert.assertTrue(screenshots.length > 0, "At least one screenshot should have been captured");
 
-        // Check that variable files were created
-        File variableDirectory = new File(variablesDir);
-        File[] variableFiles = variableDirectory.listFiles((dir, name) -> name.endsWith(".html"));
-        Assert.assertNotNull(variableFiles, "Variables directory should contain files");
-        Assert.assertTrue(variableFiles.length > 0, "At least one variable file should have been created");
+        Assert.assertFalse(Files.exists(Paths.get(variablesDir)));
+        Assert.assertTrue(originalContent.contains("Rotation Types"), "table variable is inline");
+        Assert.assertTrue(originalContent.contains("Deprecated"), "table values are inline");
     }
 
     @Test
@@ -353,22 +351,17 @@ public class EntryCountRotationTest {
         Assert.assertTrue(screenshot.exists(), "Screenshot file should exist");
         Assert.assertTrue(screenshot.length() > 0, "Screenshot file should have content");
 
-        // Verify variable file was created
-        String variablesDir = testPath + "variables";
-        File variableDir = new File(variablesDir);
-        File[] variableFiles = variableDir.listFiles((dir, name) -> name.endsWith(".html"));
-        Assert.assertNotNull(variableFiles, "Variable files should be created");
-        Assert.assertTrue(variableFiles.length > 0, "At least one variable file should be created");
+        Assert.assertFalse(Files.exists(Paths.get(testPath, "variables")));
 
         // Verify HTML contains links to both
-        String htmlContent = new String(Files.readAllBytes(Paths.get(logFilePath)));
+        String htmlContent = CompressedSnapshots.expand(new String(Files.readAllBytes(Paths.get(logFilePath))));
         Assert.assertTrue(htmlContent.contains("class='img-link'"), "HTML should contain screenshot link");
         Assert.assertTrue(htmlContent.contains("<img"), "HTML should contain screenshot thumbnail image");
         Assert.assertTrue(htmlContent.contains("loading='lazy'"), "Screenshot image should lazy load");
         Assert.assertTrue(htmlContent.contains("decoding='async'"), "Screenshot image should decode asynchronously");
         Assert.assertTrue(htmlContent.contains("width='88'"), "Screenshot image should reserve thumbnail width");
         Assert.assertTrue(htmlContent.contains("height='50'"), "Screenshot image should reserve thumbnail height");
-        Assert.assertTrue(htmlContent.contains("vars-link"), "HTML should contain variable link");
+        Assert.assertTrue(htmlContent.contains("class='entry-variables'"), "HTML should contain inline variables");
     }
 
     @Test

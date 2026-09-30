@@ -4,11 +4,13 @@ import org.json.JSONObject;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class HeliosJournalTest {
     private static JSONObject row(int ordinal, String message) {
@@ -33,6 +35,48 @@ public class HeliosJournalTest {
         }
         Files.delete(path);
         Files.delete(path.getParent());
+    }
+
+    @Test
+    public void writesOneUtf8SnapshotAtTheLimitAndStillSavesTheClosingRecord() throws Exception {
+        Path path = Files.createTempDirectory("helios-encoded-record").resolve("session.helios-journal");
+        AtomicInteger serializations = new AtomicInteger();
+        JSONObject record = new JSONObject() {
+            @Override public String toString() {
+                serializations.incrementAndGet();
+                return super.toString();
+            }
+        };
+        String message = "á漢字 😀 \n\t\"\\";
+        record.put("firstOrdinal", 0).put("entries", row(0, message).getJSONArray("entries"));
+        JSONObject start = new JSONObject().put("executionId", "utf8-test");
+        JSONObject end = new JSONObject().put("status", "OK").put("expectedEntries", 1);
+        String savedPrefix = start + "\n" + record + "\n";
+        long limit = savedPrefix.getBytes(StandardCharsets.UTF_8).length;
+        serializations.set(0);
+        try {
+            try (HeliosJournal journal = new HeliosJournal(path, start, limit)) {
+                journal.append(record);
+                Assert.assertEquals(serializations.get(), 1, "size check and write use the same serialization");
+                Assert.assertEquals(Files.size(path), limit, "an entry at the exact byte limit is accepted");
+                Assert.expectThrows(java.io.IOException.class, () -> journal.append(row(1, "over limit")));
+                Assert.assertEquals(Files.size(path), limit, "a rejected entry leaves the saved bytes intact");
+                journal.append(end);
+            }
+            Assert.assertEquals(Files.readAllBytes(path),
+                    (savedPrefix + end + "\n").getBytes(StandardCharsets.UTF_8));
+            try (HeliosJournal recovered = new HeliosJournal(path, null)) {
+                JSONObject batch = recovered.next();
+                Assert.assertEquals(batch.getInt("firstOrdinal"), 0);
+                Assert.assertEquals(batch.getJSONArray("entries").length(), 1);
+                Assert.assertEquals(batch.getJSONArray("entries").getJSONObject(0).getString("message"), message);
+                recovered.acknowledge(batch.getLong("journalOffset"));
+                Assert.assertEquals(recovered.next().toString(), end.toString());
+            }
+        } finally {
+            Files.deleteIfExists(path);
+            Files.delete(path.getParent());
+        }
     }
 
     @Test

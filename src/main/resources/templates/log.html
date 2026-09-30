@@ -1,382 +1,287 @@
 <!DOCTYPE html>
+<!-- a360-log-format:3 -->
 <html lang='en'>
 <head>
     <meta charset='UTF-8'>
-    <meta content='width=device-width, initial-scale=1.0' name='viewport'>
+    <meta name='viewport' content='width=device-width, initial-scale=1'>
     <title>Bot Framework Logs</title>
     <style>
         :root {
+            color-scheme: light dark;
             --primary: #1a73e8;
             --primary-soft: #e8f0fe;
-            --secondary: #1e8e3e;
-            --secondary-light: #81c995;
-            --danger: #d93025;
-            --danger-soft: #fce9e8;
-            --danger-soft-hover: #f8d2cc;
-            --warning-dark: #b06000;
-            --warning-soft: #fef7e0;
-            --warning-soft-hover: #feefc3;
+            --secondary: #137333;
+            --warning: #8a4b00;
+            --danger: #b3261e;
             --surface: #ffffff;
             --surface-2: #f8f9fa;
-            --text-primary: #202124;
-            --text-secondary: #5f6368;
-            --border: #e0e3e7;
-            --row-stripe: rgba(0, 0, 0, 0.018);
-            --row-hover: rgba(26, 115, 232, 0.06);
-            --shadow-2: 0 2px 6px rgba(60, 64, 67, 0.1), 0 8px 24px rgba(60, 64, 67, 0.12);
+            --text: #202124;
+            --muted: #5f6368;
+            --border: #dadce0;
+            --hover: #f1f3f4;
             --radius-sm: 6px;
+            --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         }
-
         @media (prefers-color-scheme: dark) {
             :root {
                 --primary: #8ab4f8;
                 --primary-soft: #1f3a5f;
                 --secondary: #81c995;
-                --secondary-light: #a8dab5;
+                --warning: #fdd663;
                 --danger: #f28b82;
-                --danger-soft: #3d2422;
-                --danger-soft-hover: #5d342d;
-                --warning-dark: #fdd663;
-                --warning-soft: #3c3924;
-                --warning-soft-hover: #4a4528;
                 --surface: #1e1f22;
-                --surface-2: #2b2d30;
-                --text-primary: #e8eaed;
-                --text-secondary: #9aa0a6;
-                --border: #3c4043;
-                --row-stripe: rgba(255, 255, 255, 0.025);
-                --row-hover: rgba(138, 180, 248, 0.1);
-                --shadow-2: 0 2px 6px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.5);
+                --surface-2: #282a2e;
+                --text: #e8eaed;
+                --muted: #b0b5bc;
+                --border: #45484e;
+                --hover: #303339;
             }
         }
-
-        *, *::before, *::after {
-            box-sizing: border-box;
-        }
-
-        html {
-            background-color: var(--surface);
-        }
-
+        *, *::before, *::after { box-sizing: border-box; }
+        html { background: var(--surface); }
         body {
-            font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-            background-color: var(--surface);
-            color: var(--text-primary);
-            line-height: 1.5;
+            margin: 0 auto;
+            color: var(--text);
+            background: var(--surface);
+            font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
             font-size: 14px;
-            margin: 0;
-            padding: 0;
-            -webkit-font-smoothing: antialiased;
-            -moz-osx-font-smoothing: grayscale;
+            line-height: 1.55;
+            overflow-wrap: anywhere;
         }
-
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            background-color: var(--surface);
+        ::selection { background: var(--primary-soft); color: var(--text); }
+        a { color: var(--primary); text-underline-offset: 3px; }
+        :focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+        .log-scroll { height: 100vh; overflow: auto; scrollbar-color: var(--muted) var(--surface-2); }
+        .log-table { width: 100%; min-width: 1100px; border-collapse: separate; border-spacing: 0; table-layout: fixed; }
+        .log-table th { position: sticky; top: 0; z-index: 2; background: #185abc; color: white; text-align: left; font-size: 11px; text-transform: uppercase; }
+        .log-table th, .log-table td { padding: 8px 10px; vertical-align: top; border-bottom: 1px solid var(--border); }
+        .log-table th:nth-child(1) { width: 150px; }
+        .log-table th:nth-child(2) { width: 70px; }
+        .log-table th:nth-child(3) { width: 19%; }
+        .log-table th:nth-child(4), .log-table th:nth-child(5) { width: 108px; }
+        .log-table th:nth-child(7) { width: 128px; }
+        .log-table th:nth-child(8) { width: 116px; }
+        .log-entry > td:nth-child(-n+5) { font-size: 12px; line-height: 1.4; }
+        .vars-link { font-size: 12px; white-space: nowrap; }
+        .log-entry > td:first-child { font-variant-numeric: tabular-nums; }
+        .log-entry:nth-child(even) { background: var(--surface-2); }
+        .log-entry:hover { background: var(--hover); outline: 2px solid var(--primary); outline-offset: -2px; }
+        .log-entry.level-ERROR { background: #fce9e8; }
+        .log-entry.level-ERROR:hover { background: #f8d2cc; outline-color: var(--danger); }
+        .log-entry.level-WARN { background: #fef7e0; }
+        .log-entry.level-WARN:hover { background: #feefc3; outline-color: var(--warning); }
+        .level-INFO > td:nth-child(2) { color: var(--secondary); font-weight: 750; }
+        .level-WARN > td:nth-child(2) { color: var(--warning); font-weight: 750; }
+        .level-ERROR > td:nth-child(2) { color: var(--danger); font-weight: 750; }
+        @media (prefers-color-scheme: dark) {
+            .log-entry.level-ERROR { background: #3d2422; }
+            .log-entry.level-ERROR:hover { background: #5d342d; }
+            .log-entry.level-WARN { background: #3c3924; }
+            .log-entry.level-WARN:hover { background: #4a4528; }
         }
-
-        th {
-            padding: 14px 16px;
-            background-color: var(--primary);
-            color: white;
-            position: -webkit-sticky;
-            position: sticky;
-            top: 0;
-            text-align: left;
-            font-weight: 600;
-            font-size: 11px;
-            letter-spacing: 0.06em;
-            text-transform: uppercase;
-            z-index: 10;
-            white-space: nowrap;
-        }
-
-        td {
-            padding: 12px 16px;
-            border-bottom: 1px solid var(--border);
-            vertical-align: middle;
-            word-break: break-word;
-        }
-
-        td.message-cell {
+        button { font: inherit; cursor: pointer; color: var(--primary); background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; min-height: 36px; }
+        button:hover { background: var(--primary-soft); }
+        dialog { width: min(1100px, 96vw); max-height: 90vh; padding: 20px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); overflow: auto; }
+        dialog::backdrop { background: rgba(0, 0, 0, .55); }
+        .dialog-heading { display: flex; align-items: start; gap: 16px; justify-content: space-between; }
+        .dialog-heading h2 { margin: 0; font-size: 20px; }
+        #detail-context { color: var(--muted); margin: 8px 0 16px; }
+        #detail-content > img, #detail-content > video { display: block; max-width: 100%; max-height: 65vh; margin: auto; }
+        .empty-log { padding: 20px; color: var(--muted); }
+        body:has(.log-entry) .empty-log { display: none; }
+        .message-cell { white-space: pre-wrap; overflow-wrap: anywhere; }
+        .entry-variables { margin-top: 10px; }
+        summary { cursor: pointer; min-height: 36px; padding: 6px 0; }
+        summary:hover { color: var(--primary); }
+        .entry-variables > summary { width: fit-content; color: var(--primary); font-weight: 600; }
+        .variable-list { min-width: 0; padding: 0 0 4px; }
+        .variable-card { min-width: 0; padding: 12px 0; border-top: 1px solid var(--border); }
+        .variable-name { display: inline; margin-right: 10px; font-weight: 650; }
+        .variable-type { display: inline; font-size: 11px; color: var(--muted); }
+        .variable-value {
+            margin-top: 6px;
+            font-family: var(--mono);
+            font-size: 13px;
             white-space: pre-wrap;
             overflow-wrap: anywhere;
-            word-break: normal;
         }
-
-        tbody tr {
-            content-visibility: auto;
-            contain-intrinsic-size: 0 48px;
-            transition: background-color 0.15s ease;
-        }
-
-        tbody tr:nth-child(even) {
-            background-color: var(--row-stripe);
-        }
-
-        tbody tr:hover {
-            background-color: var(--row-hover);
-            outline: 2px solid var(--primary);
-            outline-offset: -2px;
-        }
-
-        tbody tr:has(td.level-WARN) {
-            background-color: var(--warning-soft);
-        }
-
-        tbody tr:has(td.level-WARN):hover {
-            background-color: var(--warning-soft-hover);
-            outline-color: var(--warning-dark);
-        }
-
-        tbody tr:has(td.level-ERROR) {
-            background-color: var(--danger-soft);
-        }
-
-        tbody tr:has(td.level-ERROR):hover {
-            background-color: var(--danger-soft-hover);
-            outline-color: var(--danger);
-        }
-
-        tbody tr:last-child td {
-            border-bottom: none;
-        }
-
-        .level-INFO,
-        .level-WARN,
-        .level-ERROR {
-            font-weight: 700;
-            font-size: 11px;
-            letter-spacing: 0.06em;
-            text-transform: uppercase;
-            white-space: nowrap;
-        }
-
-        .level-INFO {
-            color: var(--secondary);
-        }
-
-        .level-WARN {
-            color: var(--warning-dark);
-        }
-
-        .level-ERROR {
-            color: var(--danger);
-        }
-
-        td.level-INFO::before,
-        td.level-WARN::before,
-        td.level-ERROR::before {
-            content: "";
-            display: inline-block;
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            margin-right: 8px;
-            vertical-align: 1px;
-            background-color: currentColor;
-        }
-
-        .ws-marker {
-            color: var(--text-secondary);
-            opacity: 0.55;
-            user-select: none;
-        }
-
-        .ws-tab {
-            font-size: 0.85em;
-            margin-right: -0.4em;
-        }
-
-        .ws-nl {
-            font-size: 0.85em;
-            margin-left: 2px;
-        }
-
-        .ws-trail {
-            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-        }
-
-        .img-link,
-        .vars-link {
-            text-decoration: none;
-            border-radius: var(--radius-sm);
+        .variable-card > details { margin-top: 6px; }
+        .nested-content { padding-left: 20px; border-left: 1px solid var(--border); }
+        .nested-content > .variable-card:first-child { border-top: 0; }
+        .entry-variables details.full-width > summary {
+            position: sticky;
+            top: 0;
+            z-index: 2;
+            background: var(--surface);
             font-weight: 600;
-            transition: background-color 0.15s ease, border-color 0.15s ease;
         }
-
-        .img-link {
-            display: inline-flex;
-            align-items: center;
-            padding: 0;
-            position: relative;
-        }
-
-        .video-link .play-overlay {
-            position: absolute;
-            inset: 0;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: #fff;
-            font-size: 22px;
-            text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
-            pointer-events: none;
-            border-radius: var(--radius-sm);
-        }
-
-        .video-unavailable .no-video-badge {
-            position: absolute;
-            bottom: 4px;
-            right: 4px;
-            padding: 2px 5px;
-            font-size: 9px;
-            font-weight: 700;
-            line-height: 1;
-            letter-spacing: 0.04em;
-            text-transform: uppercase;
-            color: var(--text-secondary);
-            background-color: var(--surface);
+        .table-container {
+            max-width: 100%;
+            max-height: 65vh;
+            overflow: auto;
+            scrollbar-color: var(--muted) var(--surface-2);
             border: 1px solid var(--border);
-            border-radius: var(--radius-sm);
-            pointer-events: none;
-            opacity: 0.92;
+            background: var(--surface);
         }
-
+        .table-container table { width: 100%; border-collapse: separate; border-spacing: 0; }
+        .table-container th, .table-container td {
+            padding: 10px 12px;
+            text-align: left;
+            vertical-align: top;
+            min-width: 140px;
+            border-bottom: 1px solid var(--border);
+        }
+        .table-container th { position: sticky; top: 0; z-index: 1; background: var(--surface-2); font-size: 12px; }
+        .table-container tr:last-child td { border-bottom: 0; }
+        .table-container tr:has(td):hover { background: var(--hover); }
+        .table-container td > .variable-value { margin-top: 0; }
+        .table-container .table-container { max-height: 40vh; }
+        .ws-marker { color: var(--muted); user-select: none; }
+        .ws-tab { font-size: 0.85em; margin-right: -0.4em; }
+        .ws-nl { font-size: 0.85em; margin-left: 2px; }
+        .ws-trail { font-family: var(--mono); }
+        .img-link { display: inline-flex; position: relative; border-radius: var(--radius-sm); }
         .img-link img {
-            flex: 0 0 auto;
             display: block;
             width: 88px;
             height: 50px;
+            object-fit: cover;
             border: 1px solid var(--border);
             border-radius: var(--radius-sm);
-            background-color: var(--surface-2);
-            object-fit: cover;
-            transition: border-color 0.15s ease, box-shadow 0.15s ease;
+            background: var(--surface-2);
         }
-
-        .img-link:hover img,
-        .img-link:focus-visible img {
-            border-color: var(--primary);
-            box-shadow: 0 0 0 2px var(--primary-soft);
-        }
-
-        .img-link:focus-visible {
-            outline: none;
-        }
-
-        .img-link:hover::after,
-        .img-link:focus-visible::after {
-            content: "";
+        .img-link:hover img, .img-link:focus-visible img { border-color: var(--primary); }
+        .img-link:hover::after, .img-link:focus-visible::after {
+            content: '';
             position: fixed;
-            top: 50%;
-            left: 50%;
+            top: 50%; left: 50%;
             transform: translate(-50%, -50%);
-            /* min(75vw, 1280px) gives a near-HD preview centered on the
-               viewport. On 1920x1080 displays this lands at 1280x720 with
-               comfortable margins; on 1366 laptops it scales to ~1024x576.
-               aspect-ratio: 16/9 matches typical screenshot proportions and
-               removes the need for separate width/height tuning. */
             width: min(75vw, 1280px);
             aspect-ratio: 16 / 9;
             max-height: calc(100vh - 48px);
+            background: var(--surface) var(--screenshot-preview) center / contain no-repeat;
             border: 1px solid var(--border);
-            background-color: var(--surface);
-            background-image: var(--screenshot-preview);
-            background-position: center;
-            background-repeat: no-repeat;
-            background-size: contain;
-            box-shadow: var(--shadow-2);
-            z-index: 1000;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+            z-index: 10;
             pointer-events: none;
         }
-
-        .vars-link {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            padding: 6px 12px;
-            background-color: var(--secondary);
-            color: white !important;
-            font-size: 12px;
-            letter-spacing: 0.02em;
+        .video-link .play-overlay {
+            position: absolute; inset: 0;
+            display: flex; align-items: center; justify-content: center;
+            color: white;
+            font-size: 22px;
+            text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+            pointer-events: none;
         }
-
-        .vars-link:hover,
-        .vars-link:focus-visible {
-            background-color: var(--secondary-light);
+        .video-link:not(:has(img)) { min-width: 88px; min-height: 50px; background: #202124; }
+        .no-video-badge {
+            position: absolute; bottom: 2px; right: 2px;
+            padding: 1px 4px;
+            background: var(--surface);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            font-size: 10px;
+            pointer-events: none;
         }
-
-        .vars-link:focus-visible {
-            outline: 2px solid var(--secondary);
-            outline-offset: 2px;
-        }
-
-        .variable-count {
-            color: white !important;
-        }
-
-        @media (max-width: 1024px) {
-            th, td {
-                padding: 12px;
-            }
-        }
-
         @media (max-width: 768px) {
-            body {
-                font-size: 13px;
-            }
-
-            th, td {
-                padding: 10px;
-            }
-
-            th {
-                font-size: 10px;
-            }
-
-            .responsive-hide {
-                display: none;
-            }
-
-            .img-link img {
-                width: 64px;
-                height: 40px;
-            }
-
-            .img-link:hover::after,
-            .img-link:focus-visible::after {
-                width: min(92vw, 720px);
-                max-height: calc(100vh - 32px);
-            }
+            button { min-height: 44px; }
+            summary { min-height: 44px; padding-top: 10px; padding-bottom: 10px; }
+            .table-container th, .table-container td { min-width: 120px; padding: 8px 10px; }
+            .nested-content { padding-left: 12px; }
+            .img-link:hover::after, .img-link:focus-visible::after { width: 92vw; }
         }
-
-        @media (max-width: 480px) {
-            th, td {
-                padding: 8px;
-            }
-        }
-
         @media (prefers-reduced-motion: reduce) {
-            *, *::before, *::after {
-                transition: none !important;
-            }
+            *, *::before, *::after { scroll-behavior: auto; transition: none; }
         }
     </style>
 </head>
 <body>
-<table>
-    <thead>
-    <tr>
-        <th>Datetime</th>
-        <th>Level</th>
-        <th>Source</th>
-        <th class="responsive-hide">Machine</th>
-        <th class="responsive-hide">User</th>
-        <th>Message</th>
-        <th>Variables</th>
-        <th>Screen</th>
-    </tr>
-    </thead>
-    <tbody>
+<dialog id='detail' closedby='any' aria-labelledby='detail-title' aria-describedby='detail-context'>
+    <div class='dialog-heading'><h2 id='detail-title'>Variables</h2><button type='button' id='detail-close' autofocus>Close</button></div>
+    <p id='detail-context'></p><div id='detail-content' aria-live='polite'></div>
+</dialog>
+<script>
+(() => {
+    const dialog = document.getElementById('detail'), content = document.getElementById('detail-content');
+    let request = 0, opener;
+    function clear() {
+        request++;
+        const video = content.querySelector('video');
+        if (video) { video.pause(); video.removeAttribute('src'); video.load(); }
+        content.replaceChildren();
+    }
+    document.getElementById('detail-close').onclick = () => dialog.close();
+    dialog.addEventListener('close', () => { clear(); if (opener) opener.focus({preventScroll: true}); });
+    if (!('closedBy' in dialog)) {
+        let startedOutside = false;
+        const isOutside = event => {
+            const rect = dialog.getBoundingClientRect();
+            return event.target === dialog && (event.clientX < rect.left || event.clientX > rect.right
+                || event.clientY < rect.top || event.clientY > rect.bottom);
+        };
+        dialog.addEventListener('pointerdown', event => {
+            startedOutside = event.isPrimary && event.button === 0 && isOutside(event);
+        });
+        dialog.addEventListener('pointercancel', () => { startedOutside = false; });
+        dialog.addEventListener('close', () => { startedOutside = false; });
+        dialog.addEventListener('click', event => {
+            const dismiss = startedOutside && event.button === 0 && isOutside(event);
+            startedOutside = false;
+            if (dismiss) dialog.close();
+        });
+    }
+    document.addEventListener('click', async event => {
+        const control = event.target.closest('[data-vars], .img-link');
+        if (!control || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button !== 0) return;
+        if (!dialog.showModal) { if (control.hasAttribute('data-vars')) alert('This browser cannot open variables. Open this file in a current version of Chrome, Edge, Firefox, or Safari.'); return; }
+        event.preventDefault();
+        clear();
+        const ticket = request;
+        opener = control;
+        const variables = control.hasAttribute('data-vars'), video = control.classList.contains('video-link');
+        document.getElementById('detail-title').textContent = variables ? 'Variables' : video ? 'Recording' : 'Screenshot';
+        const cells = control.closest('tr').cells;
+        document.getElementById('detail-context').textContent = [cells[0], cells[1], cells[2]].map(cell => cell.textContent).join(' · ');
+        dialog.showModal();
+        if (variables) {
+            content.textContent = 'Loading variables…';
+            try {
+                if (!window.DecompressionStream) throw new Error('unsupported');
+                const bytes = Uint8Array.from(atob(control.dataset.vars), c => c.charCodeAt(0));
+                const html = await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+                if (ticket !== request || !dialog.open) return;
+                // Only the escaped HTML generated by the logger is stored in this snapshot.
+                content.innerHTML = html;
+                const snapshot = content.querySelector('.entry-variables');
+                if (snapshot) snapshot.open = true;
+            } catch (error) {
+                if (ticket !== request || !dialog.open) return;
+                content.textContent = error.message === 'unsupported'
+                    ? 'This browser cannot decompress variables. Open this file in a current version of Chrome, Edge, Firefox, or Safari.'
+                    : 'Cannot read this variable snapshot. Try the original log file or another current browser.';
+            }
+        } else {
+            const media = document.createElement(video ? 'video' : 'img');
+            media.src = control.href;
+            if (video) { media.controls = true; media.preload = 'none'; const poster = control.querySelector('img'); if (poster) media.poster = poster.src; }
+            else media.alt = control.getAttribute('aria-label') || 'Screenshot';
+            const link = document.createElement('a');
+            link.href = control.href; link.target = '_blank'; link.rel = 'noopener'; link.textContent = 'Open original file';
+            const paragraph = document.createElement('p'); paragraph.append(link);
+            const failure = document.createElement('p');
+            media.addEventListener('error', () => {
+                if (ticket === request && dialog.open) failure.textContent = 'Media file unavailable. Keep the screenshots and clips folders beside this HTML file.';
+            });
+            content.append(media, failure, paragraph);
+        }
+    });
+})();
+</script>
+<noscript>JavaScript is required to open compressed variables. Messages and media links remain available.</noscript>
+<p class='empty-log'>No entries yet.</p>
+<div class='log-scroll' tabindex='0' role='region' aria-label='Log entries'>
+<table class='log-table'>
+<thead><tr><th scope='col'>Datetime</th><th scope='col'>Level</th><th scope='col'>Source</th><th scope='col'>Machine</th><th scope='col'>User</th><th scope='col'>Message</th><th scope='col'>Variables</th><th scope='col'>Screen</th></tr></thead>
+<tbody>
+<!-- a360-log-header:end -->

@@ -27,6 +27,8 @@ public final class HeliosConfig {
     public final String user;
     /** Proxy selector supplied by the bot agent, or {@code null} when no proxy is configured. */
     public final ProxySelector proxySelector;
+    /** Compatibility member only. CustomLogger derives media from its recording settings. */
+    public final CloudMediaMode mediaMode = CloudMediaMode.OFF;
 
     public HeliosConfig(String baseUrl, String ingestKey, String executionId, String botUri,
                         String parentBotUri, String fileId, String machine, String user,
@@ -40,6 +42,13 @@ public final class HeliosConfig {
         this.machine = nullToEmpty(machine);
         this.user = nullToEmpty(user);
         this.proxySelector = proxySelector;
+    }
+
+    /** Older callers can pass the former selection; it does not override recording inheritance. */
+    public HeliosConfig(String baseUrl, String ingestKey, String executionId, String botUri,
+                        String parentBotUri, String fileId, String machine, String user,
+                        ProxySelector proxySelector, CloudMediaMode ignoredMediaMode) {
+        this(baseUrl, ingestKey, executionId, botUri, parentBotUri, fileId, machine, user, proxySelector);
     }
 
     private static String nullToEmpty(String value) {

@@ -214,33 +214,12 @@ public class CSVReader {
         }
     }
 
-    // Helper methods for resource cleanup
-    private void closeQuietly(CSVParser parser) {
-        if (parser != null) {
+    private void closeQuietly(Closeable resource) {
+        if (resource != null) {
             try {
-                parser.close();
-            } catch (IOException e) {
-                // Swallow exception during cleanup
-            }
-        }
-    }
-
-    private void closeQuietly(Reader reader) {
-        if (reader != null) {
-            try {
-                reader.close();
-            } catch (IOException e) {
-                // Swallow exception during cleanup
-            }
-        }
-    }
-
-    private void closeQuietly(FileInputStream stream) {
-        if (stream != null) {
-            try {
-                stream.close();
-            } catch (IOException e) {
-                // Swallow exception during cleanup
+                resource.close();
+            } catch (IOException ignored) {
+                // Preserve read results when cleanup fails.
             }
         }
     }

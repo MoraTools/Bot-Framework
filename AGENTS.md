@@ -12,6 +12,13 @@ JDK 11 only (`gradle.properties` → `org.gradle.java.home`). `./gradlew clean t
 On Linux 19 tests fail for Windows-only reasons (bundled ffmpeg.exe, file-age semantics); the Windows build
 host is the acceptance environment. Output: `build/libs/A360BotFramework-<version>.jar`.
 
+## Package version
+
+User preference: always increase the package version in `build.gradle` before delivering
+package-code changes. Follow the user's Semantic Versioning rules and keep the displayed
+version in `README.md` consistent. Verify `packageVersion` and `codeVersion` in the built
+JAR. Renaming the JAR alone is not a version change. Do not increase the version on every build.
+
 ## Central Knowledge Base
 
 Shared AA knowledge: `<AA_KB_ROOT>`. Resolve environment variable; fallback: sibling `../aa-kb`.

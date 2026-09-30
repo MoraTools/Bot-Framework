@@ -45,7 +45,7 @@ final class HeliosJournal implements AutoCloseable {
             acquired = file.tryLock();
             if (acquired == null) throw new BusyException();
             if (start != null) {
-                write(start);
+                write((start.toString() + "\n").getBytes(StandardCharsets.UTF_8));
             }
             seek(0);
             String header = readLine();
@@ -66,14 +66,14 @@ final class HeliosJournal implements AutoCloseable {
         byte[] bytes = (record.toString() + "\n").getBytes(StandardCharsets.UTF_8);
         if (record.has("entries") && file.size() + bytes.length > maxBytes)
             throw new IOException("Helios journal reached its disk buffer limit");
-        write(record);
+        write(bytes);
     }
 
-    private void write(JSONObject record) throws IOException {
+    private void write(byte[] recordBytes) throws IOException {
         long before = file.size();
         try {
             file.position(before);
-            ByteBuffer bytes = StandardCharsets.UTF_8.encode(record.toString() + "\n");
+            ByteBuffer bytes = ByteBuffer.wrap(recordBytes);
             while (bytes.hasRemaining()) file.write(bytes);
             file.force(false);
         } catch (IOException error) {

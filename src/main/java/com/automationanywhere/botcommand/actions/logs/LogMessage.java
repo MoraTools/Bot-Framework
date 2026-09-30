@@ -7,6 +7,9 @@ import com.automationanywhere.botcommand.utilities.logger.CustomHTMLLayout;
 import com.automationanywhere.botcommand.utilities.logger.CustomLogger;
 import com.automationanywhere.botcommand.utilities.logger.DataConversion;
 import com.automationanywhere.botcommand.utilities.screen.CaptureScreen;
+import com.automationanywhere.botcommand.utilities.helios.CloudMediaMode;
+import com.automationanywhere.botcommand.utilities.helios.ErrorMedia;
+import com.automationanywhere.botcommand.utilities.screen.recorder.CaptureResult;
 import com.automationanywhere.commandsdk.annotations.*;
 import com.automationanywhere.commandsdk.annotations.rules.EntryList.EntryListAddButtonLabel;
 import com.automationanywhere.commandsdk.annotations.rules.EntryList.EntryListEmptyLabel;
@@ -157,60 +160,44 @@ public class LogMessage {
                 }
             }
 
-            if (session.shouldRecordVideoFor(log4jLevel)) {
-                // Always take a still poster: the HTML log uses it as the
-                // <video poster> preview thumbnail regardless of whether the
-                // user opted in to a returned screenshot path.
-                String screenshotFolder = session.getScreenshotFolderPath(log4jLevel);
-                videoPosterPath = generateRandomScreenshotPath(screenshotFolder, logLevel);
-                CaptureScreen.captureDesktop(videoPosterPath, true);
-
-                // Snapshot the rolling buffer and queue async stage-2 encode.
-                String errorUuid = UUID.randomUUID().toString();
-                Path mp4 = session.snapshotForError(errorUuid);
-                videoPath = mp4 == null ? "" : mp4.toString();
-
-                // Only expose the poster as the action's returned screenshot
-                // path when the user explicitly opted in. Reusing the poster
-                // here avoids a second screen capture when both are on.
-                if (Boolean.TRUE.equals(captureScreenshot)) {
-                    screenshotPath = videoPosterPath;
+            if (!LEVEL_INFO.equals(logLevel) && !LEVEL_WARN.equals(logLevel) && !LEVEL_ERROR.equals(logLevel))
+                throw new BotCommandException("Invalid log level");
+            boolean cloudError = LEVEL_ERROR.equals(logLevel) && session.getCloudMediaMode() != CloudMediaMode.OFF;
+            boolean localVideo = session.shouldRecordVideoFor(log4jLevel);
+            boolean cloudVideo = cloudError && session.getCloudMediaMode() == CloudMediaMode.VIDEO;
+            String stillFailure = null;
+            if (localVideo || cloudError || Boolean.TRUE.equals(captureScreenshot)) {
+                String still = generateRandomScreenshotPath(session.getScreenshotFolderPath(log4jLevel), logLevel);
+                try {
+                    CaptureScreen.captureDesktop(still, true);
+                    if (localVideo) videoPosterPath = still;
+                    if (Boolean.TRUE.equals(captureScreenshot)) screenshotPath = still;
+                    if (cloudError && videoPosterPath.isEmpty()) videoPosterPath = still;
+                } catch (Exception captureError) {
+                    if (!cloudError) throw captureError;
+                    stillFailure = "captureFailed";
                 }
-            } else if (Boolean.TRUE.equals(captureScreenshot)) {
-                // Existing screenshot-only path - unchanged behavior.
-                String screenshotFolder = session.getScreenshotFolderPath(log4jLevel);
-                screenshotPath = generateRandomScreenshotPath(screenshotFolder, logLevel);
-                CaptureScreen.captureDesktop(screenshotPath, true);
             }
 
             Map<String, Object> message = new HashMap<>();
             message.put(CustomHTMLLayout.Columns.MESSAGE, logMessage);
             message.put(CustomHTMLLayout.Columns.SCREENSHOT, screenshotPath);
-            message.put(CustomHTMLLayout.Columns.VIDEO, videoPath);
-            message.put(CustomHTMLLayout.Columns.VIDEO_POSTER, videoPosterPath);
+            message.put(CustomHTMLLayout.Columns.VIDEO, "");
+            message.put(CustomHTMLLayout.Columns.VIDEO_POSTER, localVideo ? videoPosterPath : "");
             message.put(CustomHTMLLayout.Columns.VARIABLES, variableValues);
             message.put(CustomHTMLLayout.Columns.SOURCE, getFormattedBotUri());
-
-            // Add variables folder path if variables are being logged
-            if (variableValues != null && !variableValues.isEmpty()) {
-                message.put(CustomHTMLLayout.Columns.VARIABLES_FOLDER_PATH, session.getVariablesFolderPath(log4jLevel));
-            }
-
-            Logger logger = session.getLogger();
-            switch (logLevel) {
-                case LEVEL_INFO:
-                    logger.info(message);
-                    break;
-                case LEVEL_WARN:
-                    logger.warn(message);
-                    break;
-                case LEVEL_ERROR:
-                    logger.error(message);
-                    break;
-                default:
-                    throw new BotCommandException("Invalid log level");
-            }
-
+            Path still = videoPosterPath.isEmpty() ? (screenshotPath.isEmpty() ? null : Paths.get(screenshotPath)) : Paths.get(videoPosterPath);
+            String captureFailure = stillFailure;
+            java.util.concurrent.atomic.AtomicBoolean registered = new java.util.concurrent.atomic.AtomicBoolean();
+            java.util.function.Consumer<CaptureResult> register = capture -> {
+                if (!registered.compareAndSet(false, true)) return;
+                if (localVideo && capture != null && capture.video != null)
+                    message.put(CustomHTMLLayout.Columns.VIDEO, capture.video.toString());
+                if (cloudError) message.put(ErrorMedia.COLUMN, new ErrorMedia(still, captureFailure, capture, cloudVideo, !localVideo && !Boolean.TRUE.equals(captureScreenshot)));
+                session.getLogger().log(log4jLevel, message);
+            };
+            if (localVideo || cloudVideo) session.snapshotForError(UUID.randomUUID().toString(), localVideo, register);
+            else register.accept(null);
             return new FileValue(screenshotPath);
         } catch (Exception e) {
             throw new BotCommandException("Error occurred: " + e.getMessage(), e);

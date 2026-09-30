@@ -1,5 +1,7 @@
 package logs;
 
+import com.automationanywhere.botcommand.data.Value;
+import com.automationanywhere.botcommand.data.impl.StringValue;
 import com.automationanywhere.botcommand.utilities.helios.HeliosConfig;
 import com.automationanywhere.botcommand.utilities.helios.HeliosSink;
 import com.automationanywhere.botcommand.utilities.logger.CustomHTMLLayout;
@@ -68,11 +70,13 @@ public class HeliosSinkTest {
     private static final class Call {
         final String path;
         final String key;
+        final String contentType;
         final JSONObject body;
 
-        Call(String path, String key, String body) {
+        Call(String path, String key, String contentType, String body) {
             this.path = path;
             this.key = key;
+            this.contentType = contentType;
             this.body = body.isEmpty() ? new JSONObject() : new JSONObject(body);
         }
     }
@@ -107,7 +111,8 @@ public class HeliosSinkTest {
             body = IOUtils.toString(in, StandardCharsets.UTF_8);
         }
         String path = exchange.getRequestURI().getPath();
-        calls.add(new Call(path, exchange.getRequestHeaders().getFirst(HeliosSink.KEY_HEADER), body));
+        calls.add(new Call(path, exchange.getRequestHeaders().getFirst(HeliosSink.KEY_HEADER),
+                exchange.getRequestHeaders().getFirst("Content-Type"), body));
 
         JSONObject request = new JSONObject(body);
         int status = 200;
@@ -177,10 +182,10 @@ public class HeliosSinkTest {
         return row;
     }
 
-    /** Counts data rows only; the template's own header row carries no level class. */
+    /** Counts complete log entries independently of their HTML layout. */
     private static int countRows(Path logFile) throws IOException {
         String html = new String(Files.readAllBytes(logFile), StandardCharsets.UTF_8);
-        return html.split("class='level-", -1).length - 1;
+        return (int) html.lines().filter(line -> line.equals("<!-- a360-log-entry:end -->")).count();
     }
 
     private List<Call> callsEndingWith(String suffix) {
@@ -240,6 +245,37 @@ public class HeliosSinkTest {
         Assert.assertTrue(end.body.has("utcOffsetMinutes"));
 
         Assert.assertEquals(countRows(logFile), 3, "HTML log still holds every row");
+        Assert.assertTrue(calls.stream().allMatch(call -> "application/json".equals(call.contentType)),
+                "start, entries and end keep the Helios JSON content type");
+    }
+
+    @Test
+    public void mutableVariablesAreSnapshottedBeforeDelivery() throws Exception {
+        String baseUrl = startStubServer();
+        Path logFile = newLogFile();
+        CustomLogger session = new CustomLogger("Snapshot_" + UUID.randomUUID(), logFile.toString(),
+                1000, 0, new HashSet<>(), EncodingMode.FAST, config(baseUrl));
+        StringValue value = new StringValue("before\n<&> $ \\ ñ");
+        Map<String, Value> variables = new HashMap<>();
+        variables.put("value", value);
+        Map<String, Object> row = row("snapshot");
+        row.put(CustomHTMLLayout.Columns.VARIABLES, variables);
+        try {
+            session.getLogger().info(row);
+            value.set("after");
+            session.getLogger().warn(row);
+            variables.clear();
+        } finally {
+            session.close();
+        }
+        Assert.assertEquals(stored.size(), 2);
+        Assert.assertEquals(stored.get(0).getJSONArray("variables").getJSONObject(0).getString("value"),
+                "before\n<&> $ \\ ñ");
+        Assert.assertEquals(stored.get(1).getJSONArray("variables").getJSONObject(0).getString("value"), "after");
+        JSONObject end = callsEndingWith("/end").get(0).body;
+        Assert.assertEquals(end.getInt("expectedEntries"), 2);
+        Assert.assertEquals(end.getString("status"), "WARN");
+        Assert.assertEquals(countRows(logFile), 2);
     }
 
     @Test

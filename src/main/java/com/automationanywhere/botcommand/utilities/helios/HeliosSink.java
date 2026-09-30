@@ -34,6 +34,7 @@ public final class HeliosSink {
     private final HeliosConfig config;
     private final HttpClient http;
     private final HeliosJournal journal;
+    private final HeliosMediaOutbox media;
     private final Consumer<String> warning;
     private final Thread worker;
     private final Deque<Path> recovery = new ArrayDeque<>();
@@ -42,6 +43,10 @@ public final class HeliosSink {
     private volatile boolean stopping;
 
     public HeliosSink(HeliosConfig config, Path root, Consumer<String> warning) throws Exception {
+        this(config, root, warning, UUID.randomUUID().toString());
+    }
+
+    public HeliosSink(HeliosConfig config, Path root, Consumer<String> warning, String loggerSessionId) throws Exception {
         this.config = config;
         this.warning = warning;
         HttpClient.Builder builder = HttpClient.newBuilder().connectTimeout(TIMEOUT);
@@ -62,17 +67,33 @@ public final class HeliosSink {
         }
         ZonedDateTime now = ZonedDateTime.now();
         JSONObject start = new JSONObject().put("executionId", config.executionId)
+                .put("loggerSessionId", loggerSessionId)
                 .put("botUri", config.botUri).put("parentBotUri", config.parentBotUri)
                 .put("fileId", config.fileId).put("machine", config.machine).put("user", config.user)
                 .put("startedAt", LOCAL_TIME.format(now)).put("utcOffsetMinutes", offsetMinutes(now));
         journal = new HeliosJournal(directory.resolve(UUID.randomUUID() + ".helios-journal"), start,
                 bufferBytes(warning));
+        HeliosMediaOutbox mediaOutbox;
+        try { mediaOutbox = new HeliosMediaOutbox(root, directory, loggerSessionId, journal.path.getFileName().toString(), config, http, warning); }
+        catch (IOException | RuntimeException unavailable) {
+            mediaOutbox = null;
+            warning.accept("ERROR media storage could not start. JSON and HTML logging continue.");
+        }
+        media = mediaOutbox;
+        com.automationanywhere.botcommand.utilities.screen.recorder.ScreenRecorder.recoverAtStartup();
         worker = new Thread(this::run, "helios-delivery");
         worker.setDaemon(true);
         worker.start();
     }
 
     public void append(JSONObject entry) throws IOException { journal.append(entry); }
+
+    public JSONArray registerMedia(int ordinal, ErrorMedia request) throws IOException {
+        if (media == null) throw new IOException("ERROR media outbox unavailable");
+        return media.register(ordinal, request);
+    }
+
+    public void stopMedia() { if (media != null) media.stop(); }
 
     /** Persist the expected count before waiting. A timeout never removes the journal. */
     public boolean finish(String status, int expectedEntries) throws IOException {
@@ -85,6 +106,7 @@ public final class HeliosSink {
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
         } finally {
+            if (media != null) media.finishJSON();
             stopping = true;
             worker.interrupt();
             try { worker.join(1000); }
@@ -146,6 +168,8 @@ public final class HeliosSink {
                 if (sessionId == null) {
                     JSONObject response = new JSONObject(post("/api/ingest/sessions", journal.start));
                     sessionId = UUID.fromString(response.getString("sessionId")).toString();
+                    try { if (media != null) media.session(journal.path.getFileName().toString(), sessionId, response.optJSONObject("media")); }
+                    catch (IOException mediaFailure) { warning.accept("Media session state could not be saved. JSON delivery continues; saved media is retained."); }
                 }
                 JSONObject body = pending == null ? journal.next(batchEntries) : pending;
                 if (body == null) {
@@ -171,6 +195,8 @@ public final class HeliosSink {
                             || receipt.getInt("accepted") + receipt.getInt("duplicates") != count
                             || receipt.getInt("nextOrdinal") != body.getInt("firstOrdinal") + count)
                         throw new IOException("Invalid batch receipt");
+                    try { if (media != null) media.acknowledge(journal.path.getFileName().toString(), body.getInt("firstOrdinal"), count); }
+                    catch (IOException mediaFailure) { warning.accept("Media parent receipt could not be saved. JSON delivery continues; saved media is retained."); }
                     journal.acknowledge(offset);
                     pending = null;
                     firstPendingAt = 0;
@@ -186,6 +212,11 @@ public final class HeliosSink {
                     if (!receipt.getBoolean("complete")
                             || receipt.getInt("storedEntries") != body.getInt("expectedEntries"))
                         throw new IOException("Invalid closing receipt");
+                    // Before removing replayable JSON, persist the remote identity and all verified parents.
+                    if (media != null) {
+                        media.session(journal.path.getFileName().toString(), sessionId, null);
+                        media.acknowledge(journal.path.getFileName().toString(), 0, body.getInt("expectedEntries"));
+                    }
                     journal.deleteVerified();
                     return true;
                 }

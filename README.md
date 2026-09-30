@@ -1,6 +1,8 @@
 # A360 Bot Framework Package
 
-**Version 4.3.2** - maintained by **jamir-boop**, forked from the original A360 Tools package.
+**Version 4.5.2** - maintained by **jamir-boop**, forked from the original A360 Tools package.
+
+4.5.2 shares variable-card rendering and logger setup. It keeps the existing log output, recording settings, and Helios behavior.
 
 ## Overview
 Designed to streamline bot development, enhance logging, and facilitate comprehensive documentation within tasks for A360. Tailored for efficiency, consistency, and ease of use, this package addresses common challenges in bot development and maintenance, making it an indispensable tool for modern automation projects.
@@ -24,6 +26,7 @@ Designed to streamline bot development, enhance logging, and facilitate comprehe
 - Log file rollover based on a configurable maximum number of entries per file (default 1000).
 - Log file separation per level: send all log levels to a single file, or split INFO / WARN / ERROR into separate files.
 - Screenshot capture alongside log messages for a complete logging experience.
+- Variable values are stored inside each HTML log entry. Select **Variables** to inspect names, types, nested containers, and tables in a shared dialog. The local snapshot keeps all logged values; Helios streaming limits do not apply to it.
 - **Rolling screen-recording buffer**: opt-in continuous capture of the last N seconds (5-90, default 30) of bot activity. When a log entry fires at a configured level (any combination of INFO/WARN/ERROR), the buffer is finalized into a browser-playable MP4 placed next to the log. Choose between **Fast** (H.264, larger files, faster encoding, recommended) and **Compact** (AV1, smaller files, slower encoding) per session. On JVM crash or drain timeout, both the rolling buffer and any pending per-error clips are salvaged on the next bot startup so the HTML log's video links self-heal at the paths they already reference.
 
 ### [Helios Cloud Streaming](https://github.com/A360-Tools/Bot-Framework/blob/main/docs/logs/StartLoggerSession.md)
@@ -81,6 +84,14 @@ Designed to streamline bot development, enhance logging, and facilitate comprehe
 - **Log Message**: Provides session-based logging with options for detailed messages and screenshots.
 - **Logs Start/Stop Session**: Manages the lifecycle of logging sessions, from initiation to termination. Always pair `Start Logger Session` with `Stop Logger Session` in a Finally block so logs flush and any pending video clips finalize.
 
+## Local HTML logs
+
+Each active or rotated HTML file contains its own styles and variable snapshots. Open it directly in a browser; no server or external stylesheet is required. Each variable snapshot is compressed inside the file. The Variables dialog requires JavaScript and a browser with `DecompressionStream('gzip')` support. Messages remain ordinary HTML for browser search and copy. Only the selected snapshot is decoded, and it is cleared when the dialog closes. New entries are visible after refreshing the page. Screenshots and recordings remain in `screenshots/` and `clips/` beside the log. Copy these folders with the HTML when media is needed.
+
+Entries are appended as complete blocks. Closing a session does not add a footer, and reopening a complete log keeps all existing bytes in place. Rollover counts log entries, including after a restart; rows inside a variable table do not count as extra entries. The existing maximum-entry setting still applies. Large variable snapshots increase the HTML file size and are not silently truncated.
+
+When an existing file uses an earlier HTML format or ends with an incomplete write, the next session moves that file intact to the next numbered archive (for example, `2_log.html`) and starts a fresh active file. Existing archives and old `variables/` pages are preserved. Migration stops if the file cannot be moved; it does not overwrite an archive or discard the incomplete bytes.
+
 ## Helios Cloud streaming
 
 Every logger session can optionally stream its entries live to a Helios Cloud server. The feature is off by default and existing bots keep working unchanged after upgrading the package: the new inputs were added, none were moved or renamed.
@@ -101,7 +112,7 @@ Every logger session can optionally stream its entries live to a Helios Cloud se
 | `POST {url}/api/ingest/sessions/{id}/entries` | A batch of entries: first ordinal plus timestamp, UTC offset, level, source, task, machine, user, message, variable count, the logged variables and screenshot/clip path - the same values the HTML row shows. |
 | `POST {url}/api/ingest/sessions/{id}/end` | Sent by `Stop Logger Session` with `status` = the worst level logged (`ERROR`, `WARN` or `OK`) and `expectedEntries` for delivery verification. |
 
-The ingest key travels in the `X-Helios-Ingest-Key` header. Screenshots and video clips stay on the runner; only their paths are sent.
+The ingest key travels in the `X-Helios-Ingest-Key` header. Local media paths stay in the log rows. With streaming enabled, every ERROR also uploads media according to the Screen recording settings below.
 
 The variables logged with an entry are streamed with it, each as a name, a type label (`STRING`, `NUMBER`, `LIST`, `TABLE` ...) and a plain-text value; lists, dictionaries, records and tables render as JSON text. At most 100 variables per entry are sent and each value is cut at 8192 characters, flagged with `truncated`. `variablesCount` still reports how many were logged before the cap. Nothing is streamed when Helios Cloud streaming is disabled.
 
@@ -140,3 +151,56 @@ You can build this project using Gradle with the following command:
 gradle clean build :shadowJar
 ```
 
+## Helios ERROR media
+
+Helios ERROR media inherits the existing **Screen recording** settings. There is no separate media control.
+
+| Helios Cloud streaming | Screen recording | ERROR recording | ERROR media |
+|---|---|---|---|
+| Disabled | Any setting | Any setting | No cloud media |
+| Enabled | No video, or no active recording levels/buffer | Any setting | Screenshot |
+| Enabled | Capture rolling video | Unchecked | Screenshot |
+| Enabled | Capture rolling video | Checked | Video and a separate screenshot |
+
+Every `Log Message(ERROR)` qualifies, including an ERROR that the bot later recovers from. INFO and WARN recording
+flags control local clips only. Video uploads use the same recorder, 5-90 second buffer, and FAST or COMPACT codec
+as the local ERROR clip. No extra recorder starts when No video is selected. A failed recorder still reports the
+requested video unavailable and retains its independent screenshot when capture works.
+
+Screenshots expire after 14 days and videos after 3 days. Storage limits can remove files sooner, with videos
+removed first. PNG/JPEG files over 1 MiB and MP4 files over 8 MiB report `tooLarge`. The runner does not encode a
+second video. Local HTML media and the action's returned screenshot path keep their current behavior.
+
+A child that uses the inherited logger keeps its logger identity and ordinal counter. An explicit Start Logger
+Session creates a new UUID `loggerSessionId`. Helios groups those streams under the unchanged AA `executionId`.
+A server that has no media capability still accepts JSON logging. The runner warns once and keeps bounded media
+copies for a later compatible startup.
+
+Completed upload copies and per-row state are saved under `~/.helios/outbox/media` (or the configured outbox root).
+The 256 MiB media byte budget applies across sessions and URL/key partitions for the same OS user. It is separate
+from the 256 MiB JSON limit per session. Admission uses a root file lock and counts partial copies and reservations.
+Active uploads are pinned. The runner removes old cloud videos before screenshots and preserves the original local
+files and status records. No ingest key is stored in a journal or media manifest.
+
+Media upload starts after a verified ERROR row receipt. It uses the AA proxy selector and raw file PUT requests.
+A verified media receipt is required before an upload copy is deleted. Media state survives JSON `/end` and verified
+JSON journal deletion. Any later Helios logger startup with the same URL/key can retry saved media, including a new
+session with No video selected or ERROR recording unchecked. Media retry does not recreate a deleted parent row. Close leaves the file sender
+active while the recorder drains, then stops it with an additional wait of at most one second. Delivery after JVM
+exit is not guaranteed.
+
+New sessions reuse the requested local recorder and clips. They do not add a cloud-only ring or lossless scratch
+copy. Local recording with Helios disabled needs no media ownership sidecars or media completion publisher.
+A media ownership write failure reports cloud video unavailable and keeps a requested local encode running.
+Shared originals can remain after a crash when ownership persistence failed; cleanup preserves them to avoid
+removing a requested local clip. Local rings, native temporary output, and original MP4 files remain outside the
+256 MiB upload-copy budget.
+
+Recovery support for older pending capture work remains. Its 512 MiB capture admission, 128 MiB cloud-only ring
+reservation, and software stop monitor apply to that older work, not to automatic startup in this configuration.
+Those limits are not an OS disk quota or a bound on all runner disk use. Native overshoot and orphan behavior still
+need Windows measurements if such older work is present.
+
+**Acceptance still required on Windows:** gdigrab capture and failure, FAST/COMPACT at 5 and 90 seconds, native
+write overshoot, disk and CPU use, close time, authenticated corporate proxy, and TLS inspection. Linux synthetic
+muxer and HTTP tests do not prove these results. Deploy the server capability before bots use the inherited ERROR upload behavior.

@@ -15,14 +15,12 @@ import org.json.JSONObject;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.UUID;
 
 /**
  * @author jamir-boop
@@ -55,16 +53,9 @@ public class HeliosJsonLayoutTest {
         return row;
     }
 
-    private static HeliosJsonLayout layout(String sessionKey) {
-        return HeliosJsonLayout.newBuilder()
-                .withCharset(StandardCharsets.UTF_8)
-                .withSessionKey(sessionKey)
-                .build();
-    }
-
     @Test
     public void entryCarriesTheColumnsMapValues() {
-        JSONObject envelope = new JSONObject(layout("").toSerializable(event(Level.ERROR, row())));
+        JSONObject envelope = new HeliosJsonLayout().toJson(event(Level.ERROR, row()), 0);
         JSONObject entry = envelope.getJSONArray("entries").getJSONObject(0);
 
         Assert.assertEquals(entry.length(), 11, "entry field count");
@@ -89,7 +80,7 @@ public class HeliosJsonLayoutTest {
         row.put(CustomHTMLLayout.Columns.SOURCE, "no-task-here");
         row.remove(CustomHTMLLayout.Columns.VARIABLES);
 
-        JSONObject entry = new JSONObject(layout("").toSerializable(event(Level.INFO, row)))
+        JSONObject entry = new HeliosJsonLayout().toJson(event(Level.INFO, row), 0)
                 .getJSONArray("entries").getJSONObject(0);
 
         Assert.assertEquals(entry.getString("screenPath"), "C:\\logs\\screenshots\\error_1.png");
@@ -111,7 +102,7 @@ public class HeliosJsonLayoutTest {
         Map<String, Object> row = row();
         row.put(CustomHTMLLayout.Columns.VARIABLES, variables);
 
-        JSONObject entry = new JSONObject(layout("").toSerializable(event(Level.INFO, row)))
+        JSONObject entry = new HeliosJsonLayout().toJson(event(Level.INFO, row), 0)
                 .getJSONArray("entries").getJSONObject(0);
         JSONArray streamed = entry.getJSONArray("variables");
 
@@ -146,7 +137,7 @@ public class HeliosJsonLayoutTest {
         Map<String, Object> row = row();
         row.put(CustomHTMLLayout.Columns.VARIABLES, variables);
 
-        JSONObject entry = new JSONObject(layout("").toSerializable(event(Level.INFO, row)))
+        JSONObject entry = new HeliosJsonLayout().toJson(event(Level.INFO, row), 0)
                 .getJSONArray("entries").getJSONObject(0);
         JSONArray streamed = entry.getJSONArray("variables");
 
@@ -168,7 +159,7 @@ public class HeliosJsonLayoutTest {
         Map<String, Object> row = row();
         row.put(CustomHTMLLayout.Columns.VARIABLES, variables);
 
-        JSONArray streamed = new JSONObject(layout("").toSerializable(event(Level.INFO, row)))
+        JSONArray streamed = new HeliosJsonLayout().toJson(event(Level.INFO, row), 0)
                 .getJSONArray("entries").getJSONObject(0).getJSONArray("variables");
 
         Assert.assertEquals(streamed.getJSONObject(0).getString("value").length(), 8192);
@@ -177,39 +168,28 @@ public class HeliosJsonLayoutTest {
     }
 
     @Test
-    public void ordinalsIncrementPerEnvelope() {
-        HeliosJsonLayout layout = layout("");
-        for (int expected = 0; expected < 3; expected++) {
-            JSONObject envelope = new JSONObject(layout.toSerializable(event(Level.INFO, row())));
-            Assert.assertEquals(envelope.getLong("firstOrdinal"), expected);
+    public void envelopesKeepTheAppenderOrdinal() {
+        HeliosJsonLayout layout = new HeliosJsonLayout();
+        for (int ordinal : new int[] { 0, 7, 8, 0 }) {
+            JSONObject envelope = layout.toJson(event(Level.INFO, row()), ordinal);
+            Assert.assertEquals(envelope.getInt("firstOrdinal"), ordinal);
             Assert.assertEquals(envelope.getJSONArray("entries").length(), 1);
+            Assert.assertEquals(envelope.length(), 2);
         }
     }
 
     @Test
-    public void statusReportsTheWorstLevelSeenAndIsConsumedOnce() {
-        String key = UUID.randomUUID().toString();
-        HeliosJsonLayout layout = layout(key);
-
-        layout.toSerializable(event(Level.INFO, row()));
-        layout.toSerializable(event(Level.WARN, row()));
-        Assert.assertEquals(HeliosJsonLayout.consumeStatus(key), "WARN");
-        Assert.assertEquals(HeliosJsonLayout.consumeStatus(key), "OK", "registry entry is removed");
-
-        String errorKey = UUID.randomUUID().toString();
-        HeliosJsonLayout errorLayout = layout(errorKey);
-        errorLayout.toSerializable(event(Level.ERROR, row()));
-        errorLayout.toSerializable(event(Level.INFO, row()));
-        Assert.assertEquals(HeliosJsonLayout.consumeStatus(errorKey), "ERROR");
-
-        String cleanKey = UUID.randomUUID().toString();
-        layout(cleanKey).toSerializable(event(Level.INFO, row()));
-        Assert.assertEquals(HeliosJsonLayout.consumeStatus(cleanKey), "OK");
-    }
-
-    @Test
-    public void contentTypeIsJson() {
-        Assert.assertTrue(layout("").getContentType().startsWith("application/json"),
-                "the Http appender sends the layout content type");
+    public void statusReportsTheWorstLevelForEachSession() {
+        HeliosJsonLayout layout = new HeliosJsonLayout();
+        HeliosJsonLayout clean = new HeliosJsonLayout();
+        Assert.assertEquals(layout.status(), "OK");
+        layout.toJson(event(Level.INFO, row()), 0);
+        layout.toJson(event(Level.WARN, row()), 1);
+        Assert.assertEquals(layout.status(), "WARN");
+        layout.toJson(event(Level.ERROR, row()), 2);
+        layout.toJson(event(Level.INFO, row()), 3);
+        Assert.assertEquals(layout.status(), "ERROR");
+        Assert.assertEquals(layout.status(), "ERROR", "reading status does not reset it");
+        Assert.assertEquals(clean.status(), "OK", "sessions do not share status");
     }
 }

@@ -25,7 +25,7 @@ configure(allprojects){
 		groupName = 'com.automationanywhere'
 		testNgVersion = '7.12.0'
 		loggerVersion = '2.25.3'
-		version '4.3.2'
+		version '4.5.2'
 	}
 	group "$groupName"
 
@@ -55,6 +55,14 @@ configure(allprojects){
 	jar.dependsOn commandCodeGen
 	shadowJar.dependsOn commandCodeGen
 
+	// SDK 1.7.0 deletes the copied template after merging. Restore it for incremental builds.
+	commandCodeGen.doFirst {
+		copy {
+			from 'src/main/resources/package.template'
+			into "$buildDir/resources/main"
+		}
+	}
+
 	shadowJar {
 		archiveBaseName = project.name
 		archiveClassifier = ''
@@ -66,6 +74,28 @@ configure(allprojects){
 		exclude 'META-INF/*.DSA'
 		exclude 'META-INF/*.RSA'
 		relocate 'org.apache.commons.io', 'botframework.shaded.commons.io'
+
+		doLast {
+			def json = new groovy.json.JsonSlurper()
+			def generated = json.parse(file('build/generated/sources/annotationProcessor/java/main/tmp/commands.json'))
+			def packaged
+			new java.util.zip.ZipFile(archiveFile.get().asFile).withCloseable { zip ->
+				packaged = json.parse(zip.getInputStream(zip.getEntry('package.json')))
+			}
+			def controls
+			controls = { attributes -> attributes.collect { attribute ->
+				[name: attribute.name, type: attribute.type, defaultValue: attribute.defaultValue,
+				 rules: (attribute.rules ?: []).collect { [name: it.name, value: it.value] },
+				 attributes: controls(attribute.attributes ?: []),
+				 options: (attribute.options ?: []).collect { [value: it.value, attributes: controls(it.attributes ?: [])] }]
+			} }
+			def expected = generated.collectEntries { [(it.name): controls(it.attributes ?: [])] }
+			def actual = packaged.commands.collectEntries { [(it.name): controls(it.attributes ?: [])] }
+			if (packaged.commands.size() != generated.size() || actual != expected
+					|| packaged.packageVersion != project.version.toString() || packaged.codeVersion != project.version.toString()) {
+				throw new GradleException('Packaged command controls or version differ from the current source.')
+			}
+		}
 	}
 
 	dependencies {

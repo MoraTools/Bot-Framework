@@ -91,7 +91,8 @@ public class HeliosDeliveryTest {
                 Assert.assertFalse(server.verified.contains("torn"));
                 Assert.assertTrue(Files.exists(gap));
                 Assert.assertTrue(Files.exists(torn));
-                Assert.assertFalse(Files.exists(healthy));
+                // The server flag precedes response delivery and the client's durable receipt handoff.
+                await(() -> !Files.exists(healthy));
             } finally { Assert.assertTrue(sink.finish("OK", 0)); }
         }
     }

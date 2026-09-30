@@ -7,6 +7,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -52,6 +53,11 @@ public final class ClipFinalizer {
     public static void encodeSegmentsToMp4(Path ffmpegExe, Path segmentsDir, Path targetMp4,
                                            EncodingMode mode)
             throws IOException, InterruptedException {
+        encodeSegmentsToMp4(ffmpegExe, segmentsDir, targetMp4, mode, Long.MAX_VALUE);
+    }
+
+    public static void encodeSegmentsToMp4(Path ffmpegExe, Path segmentsDir, Path targetMp4,
+            EncodingMode mode, long maximumBytes) throws IOException, InterruptedException {
         List<Path> segments = listMovFilesByMtimeAsc(segmentsDir);
         if (segments.isEmpty()) {
             throw new IOException("No .mov segments to encode in " + segmentsDir);
@@ -64,6 +70,12 @@ public final class ClipFinalizer {
         Files.deleteIfExists(tmpOut);
 
         String[] cmd = buildEncodeCommand(ffmpegExe, concatList, tmpOut, mode);
+        if (maximumBytes != Long.MAX_VALUE) {
+            List<String> bounded = new ArrayList<>(Arrays.asList(cmd));
+            bounded.add(bounded.size() - 1, "-fs");
+            bounded.add(bounded.size() - 1, Long.toString(maximumBytes + 1));
+            cmd = bounded.toArray(new String[0]);
+        }
 
         Process process = new ProcessBuilder(cmd)
                 .redirectErrorStream(true)
@@ -113,6 +125,7 @@ public final class ClipFinalizer {
             throw new IOException("ffmpeg produced empty output at " + tmpOut);
         }
 
+        if (Files.size(tmpOut) > maximumBytes) throw new TooLargeException();
         Files.createDirectories(targetMp4.getParent());
         try {
             Files.move(tmpOut, targetMp4, StandardCopyOption.ATOMIC_MOVE,
@@ -124,50 +137,45 @@ public final class ClipFinalizer {
         }
     }
 
+    public static final class TooLargeException extends IOException {
+        TooLargeException() { super("Cloud video exceeds the byte limit"); }
+    }
+
     private static String[] buildEncodeCommand(Path ffmpegExe, Path concatList, Path tmpOut,
                                                EncodingMode mode) {
         String ff = ffmpegExe.toAbsolutePath().toString();
         String input = concatList.toAbsolutePath().toString();
         String output = tmpOut.toAbsolutePath().toString();
 
-        if (mode == EncodingMode.FAST) {
-            return new String[]{
-                    ff,
-                    "-hide_banner",
-                    "-loglevel", "error",
-                    "-f", "concat",
-                    "-safe", "0",
-                    "-fflags", "+igndts+genpts",
-                    "-i", input,
-                    "-c:v", "libx264",
-                    "-preset", "ultrafast",
-                    "-crf", "23",
-                    "-pix_fmt", "yuv420p",
-                    "-movflags", "+faststart",
-                    "-f", "mp4",
-                    output
-            };
-        }
-        // COMPACT (default fallback): libaom-av1.
-        return new String[]{
+        List<String> command = new ArrayList<>(Arrays.asList(
                 ff,
                 "-hide_banner",
                 "-loglevel", "error",
                 "-f", "concat",
                 "-safe", "0",
                 "-fflags", "+igndts+genpts",
-                "-i", input,
-                "-c:v", "libaom-av1",
-                "-b:v", "1500k",
-                "-cpu-used", "8",
-                "-row-mt", "1",
-                "-tile-columns", "2",
-                "-g", "60",
+                "-i", input));
+        if (mode == EncodingMode.FAST) {
+            command.addAll(Arrays.asList(
+                    "-c:v", "libx264",
+                    "-preset", "ultrafast",
+                    "-crf", "23"));
+        } else {
+            // COMPACT (default fallback): libaom-av1.
+            command.addAll(Arrays.asList(
+                    "-c:v", "libaom-av1",
+                    "-b:v", "1500k",
+                    "-cpu-used", "8",
+                    "-row-mt", "1",
+                    "-tile-columns", "2",
+                    "-g", "60"));
+        }
+        command.addAll(Arrays.asList(
                 "-pix_fmt", "yuv420p",
                 "-movflags", "+faststart",
                 "-f", "mp4",
-                output
-        };
+                output));
+        return command.toArray(new String[0]);
     }
 
     private static void writeConcatList(List<Path> segments, Path concatList) throws IOException {
@@ -181,7 +189,7 @@ public final class ClipFinalizer {
         Files.write(concatList, sb.toString().getBytes(StandardCharsets.UTF_8));
     }
 
-    private static List<Path> listMovFilesByMtimeAsc(Path dir) throws IOException {
+    static List<Path> listMovFilesByMtimeAsc(Path dir) throws IOException {
         try (Stream<Path> stream = Files.list(dir)) {
             return stream
                     .filter(p -> p.getFileName().toString().toLowerCase().endsWith(".mov"))

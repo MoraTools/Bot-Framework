@@ -11,7 +11,6 @@ import org.testng.annotations.Test;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -33,8 +32,8 @@ public class ClipFinalizerTest {
 
     @AfterMethod
     public void tearDown() {
-        deleteRecursivelyQuietly(fixtureDir);
-        deleteRecursivelyQuietly(outputDir);
+        RecorderTestSupport.deleteRecursivelyQuietly(fixtureDir);
+        RecorderTestSupport.deleteRecursivelyQuietly(outputDir);
     }
 
     @Test
@@ -128,16 +127,4 @@ public class ClipFinalizerTest {
         }
     }
 
-    private static void deleteRecursivelyQuietly(Path root) {
-        if (root == null || !Files.exists(root)) return;
-        try (Stream<Path> walk = Files.walk(root)) {
-            walk.sorted(Comparator.reverseOrder()).forEach(p -> {
-                try {
-                    Files.deleteIfExists(p);
-                } catch (IOException ignored) {
-                }
-            });
-        } catch (IOException ignored) {
-        }
-    }
 }
