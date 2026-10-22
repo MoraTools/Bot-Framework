@@ -309,15 +309,33 @@ public class HTMLGenerator {
                 "</a>";
     }
 
+    /**
+     * Link to a file supplied by another package, shown under the message text. The link text is the
+     * original file name. It is a plain anchor, so the viewer script leaves it to the browser.
+     */
+    public static String getAttachmentHTML(String attachmentPath, Path htmlDirectory) {
+        if (attachmentPath == null || attachmentPath.isEmpty()) {
+            return "";
+        }
+        return "<div><a href='"
+                + StringEscapeUtils.escapeHtml4(mediaHref(attachmentPath, "attachments", htmlDirectory))
+                + "' target='_blank' rel='noopener'>"
+                + StringEscapeUtils.escapeHtml4(Paths.get(attachmentPath).getFileName().toString())
+                + "</a></div>";
+    }
+
     private static String mediaHref(String mediaPath, String folder, Path htmlDirectory) {
         if (htmlDirectory == null) return folder + "/" + FilenameUtils.getName(mediaPath);
         Path target = Paths.get(mediaPath).toAbsolutePath().normalize();
         try {
             String relative = htmlDirectory.toAbsolutePath().normalize().relativize(target)
                     .toString().replace(java.io.File.separatorChar, '/');
+            String href = new URI(null, null, relative, null).toASCIIString();
+            // A colon before the first slash would read as a URI scheme, for example "javascript:x.txt".
+            int colon = href.indexOf(':'), slash = href.indexOf('/');
+            if (colon >= 0 && (slash < 0 || colon < slash)) href = "./" + href;
             // URL quoting also protects paths inside the CSS preview declaration.
-            return new URI(null, null, relative, null).toASCIIString()
-                    .replace("'", "%27").replace("(", "%28").replace(")", "%29");
+            return href.replace("'", "%27").replace("(", "%28").replace(")", "%29");
         } catch (IllegalArgumentException differentRoot) {
             return target.toUri().toASCIIString().replace("'", "%27").replace("(", "%28").replace(")", "%29");
         } catch (URISyntaxException invalidPath) {

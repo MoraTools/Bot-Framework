@@ -76,10 +76,13 @@ public class HeliosJsonLayout {
             message = text(messageObject.get(CustomHTMLLayout.Columns.MESSAGE));
             source = text(messageObject.get(CustomHTMLLayout.Columns.SOURCE));
 
-            String videoPath = text(messageObject.get(CustomHTMLLayout.Columns.VIDEO));
-            screenPath = videoPath.isEmpty()
-                    ? text(messageObject.get(CustomHTMLLayout.Columns.SCREENSHOT))
-                    : videoPath;
+            // Local files supplied by another package stay on this machine.
+            if (!Boolean.TRUE.equals(messageObject.get(CustomHTMLLayout.Columns.EXTERNAL))) {
+                String videoPath = text(messageObject.get(CustomHTMLLayout.Columns.VIDEO));
+                screenPath = videoPath.isEmpty()
+                        ? text(messageObject.get(CustomHTMLLayout.Columns.SCREENSHOT))
+                        : videoPath;
+            }
 
             Object variableMap = messageObject.get(CustomHTMLLayout.Columns.VARIABLES);
             if (variableMap instanceof Map) {

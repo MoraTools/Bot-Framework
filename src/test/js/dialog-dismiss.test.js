@@ -31,11 +31,12 @@ function boot(native) {
         if (name === 'pointerdown' && !('isPrimary' in event)) event.isPrimary = true;
         for (const handler of handlers[name] || []) handler(event);
     }
+    const documentHandlers = {};
     vm.runInNewContext(script, {document: {
         getElementById: id => ({detail: dialog, 'detail-content': content, 'detail-close': closeButton})[id],
-        addEventListener() {}
+        addEventListener: (name, handler) => (documentHandlers[name] ??= []).push(handler)
     }});
-    return {dialog, handlers, cleanup, closeButton, emit};
+    return {dialog, handlers, documentHandlers, cleanup, closeButton, emit};
 }
 
 const native = boot(true);
@@ -78,4 +79,27 @@ for (const reset of ['pointercancel', 'close', 'click']) {
 const noPointer = boot(false);
 noPointer.emit('click');
 assert.equal(noPointer.dialog.open, true, 'a click without a pointerdown does not dismiss');
-console.log(`PASS (${htmlPath}): native setup, Close button, 14 pointer cases, gesture resets, and media cleanup`);
+
+// An attachment link is a plain anchor. It has neither [data-vars] nor .img-link, so the page script must
+// leave its click to the browser.
+const page = boot(true);
+assert.equal(page.documentHandlers.click.length, 1, 'one document click handler');
+const selectors = [];
+function control(classes, hasData) {
+    const element = {
+        closest(selector) {
+            selectors.push(selector);
+            const match = selector.split(',').map(part => part.trim()).some(part =>
+                part === '[data-vars]' ? hasData : part.startsWith('.') && classes.includes(part.slice(1)));
+            return match ? element : null;
+        }
+    };
+    return element;
+}
+let prevented = 0;
+const plainLink = {target: control([], false), button: 0, preventDefault: () => prevented++};
+page.documentHandlers.click[0](plainLink);
+assert.equal(prevented, 0, 'the attachment link keeps its native click');
+assert.deepEqual(selectors.map(selector => selector.split(',').map(part => part.trim()).sort()), [['.img-link', '[data-vars]']],
+    'the script selects only variable buttons and media links');
+console.log(`PASS (${htmlPath}): native setup, Close button, 14 pointer cases, gesture resets, media cleanup, and plain links`);

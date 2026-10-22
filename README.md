@@ -1,6 +1,8 @@
 # A360 Bot Framework Package
 
-**Version 5.0.1** - maintained by **jamir-boop**, forked from the original A360 Tools package.
+**Version 5.1.0** - maintained by **jamir-boop**, forked from the original A360 Tools package.
+
+5.1.0 adds `logExternal`, a call that lets other packages write entries to an open logger session. See [Logging from other packages](#logging-from-other-packages). The HTML log format and the existing actions do not change.
 
 5.0.1 fixes HTML output ownership, format migration, Helios stream confirmation, and recorder recovery.
 
@@ -105,6 +107,18 @@ Entries are appended as complete blocks. Closing a session does not add a footer
 Each HTML output file has an OS ownership lock. Sessions in the same JVM share it until the last session closes. Another process is rejected before append or migration. The rejected start leaves a notice. On its next log call or close, the owner writes a local `WARN`. This row does not reach Helios, advance the stream ordinal, change the session result, or trigger media capture.
 
 Current logs use HTML format 6. When an existing file uses an earlier format, has a different Machine or User, or ends with an incomplete write, the next session moves that file intact to the next numbered archive (for example, `2_log.html`) and starts a fresh active file. All original bytes, existing archives, and old `variables/` pages are preserved. Migration stops if the file cannot be moved; it does not overwrite an archive or discard the incomplete bytes.
+
+## Logging from other packages
+
+Another package can write to an open logger session with one reflective call. It needs no dependency on this package, because the signature uses only JDK types.
+
+```java
+java.lang.reflect.Method log = session.getClass().getMethod("logExternal",
+        String.class, String.class, String.class, String.class, String.class);
+log.invoke(session, "WARN", "Invoice 42 skipped", "Other package", screenshotPathOrNull, attachmentPathOrNull);
+```
+
+The level is `INFO`, `WARN`, or `ERROR`, in any letter case. A screenshot is the absolute path of an existing image that an installed JDK `ImageIO` reader recognizes, for example PNG or JPEG. An attachment is the absolute path of an existing file; the log shows a link with the file name under the message. The call never copies, moves, or deletes these files. It does not capture the screen or video, and Helios gets no local path or file bytes. See [Logging from other packages](https://github.com/A360-Tools/Bot-Framework/blob/main/docs/logs/StartLoggerSession.md#logging-from-other-packages) for validation and errors.
 
 ## Helios Cloud streaming
 

@@ -19,6 +19,8 @@ import org.apache.logging.log4j.core.config.builder.api.LoggerComponentBuilder;
 import org.apache.logging.log4j.core.config.builder.impl.BuiltConfiguration;
 import org.apache.logging.log4j.core.config.builder.impl.DefaultConfigurationBuilder;
 
+import javax.imageio.ImageIO;
+import javax.imageio.stream.ImageInputStream;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
@@ -28,6 +30,7 @@ import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Collections;
@@ -399,6 +402,57 @@ public class CustomLogger implements CloseableSessionObject {
     public synchronized Logger getLogger() {
         if (!isClosed()) reportContention();
         return logger;
+    }
+
+    /**
+     * Writes one entry for another package. The signature has only JDK types, so a package that loads in
+     * another class loader can call it by reflection. This call never captures the screen, records video,
+     * or copies, moves, or deletes a file.
+     *
+     * @param level          {@code INFO}, {@code WARN}, or {@code ERROR}, in any letter case
+     * @param message        text for the Message column; may be empty
+     * @param source         text for the Source column; may be {@code null} or empty
+     * @param screenshotPath {@code null}, empty, or an absolute path to an existing image; shown in the Screen column
+     * @param attachmentPath {@code null}, empty, or an absolute path to an existing file; linked under the message
+     * @throws IllegalArgumentException if the level, the message, or a path is not valid
+     * @throws IllegalStateException    if this session is closed
+     */
+    public synchronized void logExternal(String level, String message, String source,
+                                         String screenshotPath, String attachmentPath) {
+        if (closed || isClosed()) throw new IllegalStateException("Logger session is closed");
+        Level log4jLevel;
+        if ("INFO".equalsIgnoreCase(level)) log4jLevel = Level.INFO;
+        else if ("WARN".equalsIgnoreCase(level)) log4jLevel = Level.WARN;
+        else if ("ERROR".equalsIgnoreCase(level)) log4jLevel = Level.ERROR;
+        else throw new IllegalArgumentException("Log level must be INFO, WARN, or ERROR");
+        if (message == null) throw new IllegalArgumentException("Log message must not be null");
+
+        Map<String, Object> row = new HashMap<>();
+        row.put(CustomHTMLLayout.Columns.MESSAGE, message);
+        row.put(CustomHTMLLayout.Columns.SOURCE, source == null ? "" : source);
+        row.put(CustomHTMLLayout.Columns.SCREENSHOT, externalFile(screenshotPath, "Screenshot path", true));
+        row.put(CustomHTMLLayout.Columns.ATTACHMENT, externalFile(attachmentPath, "Attachment path", false));
+        row.put(CustomHTMLLayout.Columns.EXTERNAL, Boolean.TRUE);
+        getLogger().log(log4jLevel, row);
+    }
+
+    /** Returns the path when it is empty or names an existing file (an image when required); never touches the file. */
+    private static String externalFile(String path, String name, boolean image) {
+        if (path == null || path.isEmpty()) return "";
+        try {
+            Path file = Paths.get(path);
+            if (file.isAbsolute() && Files.isRegularFile(file) && (!image || isImage(file))) return path;
+        } catch (InvalidPathException | IOException unreadable) {
+            // Rejected below, like any other path that is not usable.
+        }
+        throw new IllegalArgumentException(name + " must be an absolute path to an existing "
+                + (image ? "image" : "file") + ": " + path);
+    }
+
+    private static boolean isImage(Path file) throws IOException {
+        try (ImageInputStream input = ImageIO.createImageInputStream(file.toFile())) {
+            return input != null && ImageIO.getImageReaders(input).hasNext();
+        }
     }
 
     /** True when the supplied level is in the configured recording-levels set and recorder is healthy. */

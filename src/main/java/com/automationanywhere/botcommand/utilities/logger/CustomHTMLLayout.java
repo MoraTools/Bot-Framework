@@ -106,6 +106,7 @@ public class CustomHTMLLayout extends AbstractStringLayout {
         String sourceBotPath = "";
         String variablesHTML = "";
         String screenCell = "";
+        String attachmentHTML = "";
 
         // Parse the message and extract column details for current row
         Object[] parameters = event.getMessage().getParameters();
@@ -128,6 +129,10 @@ public class CustomHTMLLayout extends AbstractStringLayout {
             // Render the renamed "Screen" column cell. Video takes priority when present;
             // otherwise the existing screenshot path is used.
             screenCell = HTMLGenerator.getScreenCellHTML(screenshotPath, videoPath, videoPosterPath, htmlDirectory);
+            // Built apart from the message so the message keeps its own escaping.
+            attachmentHTML = HTMLGenerator.getAttachmentHTML(
+                    Optional.ofNullable(messageObject.get(Columns.ATTACHMENT)).map(Object::toString).orElse(""),
+                    htmlDirectory);
         } else {
             message = event.getMessage().getFormattedMessage();
         }
@@ -142,7 +147,7 @@ public class CustomHTMLLayout extends AbstractStringLayout {
                 StringEscapeUtils.escapeHtml4(formatTimestamp(event.getTimeMillis())),
                 StringEscapeUtils.escapeHtml4(event.getLevel().toString()),
                 StringEscapeUtils.escapeHtml4(sourceBotPath),
-                HTMLGenerator.escapeWithWhitespaceMarkers(message),
+                HTMLGenerator.escapeWithWhitespaceMarkers(message) + attachmentHTML,
                 variablesHTML,
                 screenCell
         );
@@ -200,5 +205,9 @@ public class CustomHTMLLayout extends AbstractStringLayout {
         public static final String SCREENSHOT = "Screenshot";
         public static final String VIDEO = "Video";
         public static final String VIDEO_POSTER = "VideoPoster";
+        /** Local file linked under the message text; set only by {@code CustomLogger.logExternal}. */
+        public static final String ATTACHMENT = "Attachment";
+        /** Marks an entry from {@code CustomLogger.logExternal}; Helios gets no local media path for it. */
+        public static final String EXTERNAL = "External";
     }
 }

@@ -172,3 +172,45 @@ Throws `BotCommandException` if:
 If the screen recorder fails to start (for example, when running headless or when the bundled ffmpeg cannot extract), the session degrades silently to the existing screenshot-only path rather than failing the bot.
 
 Helios delivery delays and failures are reported once per logger session as a local `WARN`. A failure to save an entry adds an incomplete-log warning even after an earlier delivery warning. These diagnostics are not streamed and do not advance the ordinal or change the session result.
+
+## Logging from other packages
+
+Another Automation Anywhere package can write entries to this session. Each package loads in its own class loader, so the other package cannot use the classes of this package directly. Take the session object that the `Logger` variable holds, as a plain `Object`, and call `logExternal` by reflection. The method uses only JDK types.
+
+```java
+public void logExternal(String level, String message, String source, String screenshotPath, String attachmentPath)
+```
+
+```java
+java.lang.reflect.Method log = session.getClass().getMethod("logExternal",
+        String.class, String.class, String.class, String.class, String.class);
+log.invoke(session, "WARN", "Invoice 42 skipped", "Other package",
+        "C:\\Evidence\\invoice-42.png", "C:\\Reports\\invoice-42.pdf");
+```
+
+`Method.invoke` wraps an exception from `logExternal` in a `java.lang.reflect.InvocationTargetException`. Call `getCause()` on it to get the `IllegalArgumentException` or `IllegalStateException` that is described below. Do not ignore it: the entry was not written.
+
+### Validation
+
+* `level` must be `INFO`, `WARN`, or `ERROR`. The letter case does not matter. Any other value, including `null`, throws `IllegalArgumentException`.
+* `message` must not be `null`. An empty message is allowed. The log shows the message exactly as `Log Message` shows it: HTML-escaped, with spaces, tabs, line breaks, and trailing spaces marked.
+* `source` can be `null` or empty. It is shown in the Source column.
+* `screenshotPath` can be `null` or empty. Otherwise it must be the absolute path of an existing image file. The call checks the file content with the `ImageIO` readers that the installed JDK provides. It accepts a file when one of these readers recognizes it, for example PNG or JPEG. The formats that the JDK supports can change, so there is no fixed list. A file that no reader recognizes is rejected. The default JDK 11 has no reader for WebP or SVG. The Screen column shows the image in the same way as a `Log Message` screenshot.
+* `attachmentPath` can be `null` or empty. Otherwise it must be the absolute path of an existing regular file. The Message cell shows a link under the message text. The link text is the file name.
+* A relative path, a missing path, a folder, or (for a screenshot) a file that is not an image throws `IllegalArgumentException`. When a check fails, the call writes nothing and does not change any file.
+
+Links are relative to the folder of the HTML file when the file is on the same drive or root. For a different root (for example, another Windows drive), the link is a `file:` URI. File names are URL-quoted and HTML-escaped. A file name cannot become markup.
+
+The HTML format does not change. The entry has the same six columns, counts as one entry toward the maximum log entries, and follows the same rollover rules. Existing format-6 logs continue to render and accept appended entries.
+
+### No media capture or upload
+
+`logExternal` does not capture the screen, record or save a video, take a snapshot of the rolling buffer, or add Helios ERROR media. This is also true for the `ERROR` level. Helios Cloud receives the level, the message, and the source in the same way as for other entries. The `screenPath` field is empty. Helios does not receive the screenshot path, the attachment path, or any file bytes. The local HTML log keeps the links.
+
+### File ownership
+
+The caller owns the files. The logger only reads them to check the path and to show the links. It never copies, moves, renames, changes, or deletes them. The links point to the original files, so keep them in place for as long as people read the log. A moved or deleted file leaves a broken link.
+
+### Closed session
+
+After `Stop Logger Session` closes the session, `logExternal` throws `IllegalStateException` with the message `Logger session is closed`. Nothing is written. A call from another thread waits while the session closes, and then it throws this exception. Calls from many threads are safe, and each call writes one complete entry.
