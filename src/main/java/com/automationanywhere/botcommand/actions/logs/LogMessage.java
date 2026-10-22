@@ -5,19 +5,15 @@ import com.automationanywhere.botcommand.data.impl.FileValue;
 import com.automationanywhere.botcommand.exception.BotCommandException;
 import com.automationanywhere.botcommand.utilities.logger.CustomHTMLLayout;
 import com.automationanywhere.botcommand.utilities.logger.CustomLogger;
-import com.automationanywhere.botcommand.utilities.logger.DataConversion;
 import com.automationanywhere.botcommand.utilities.screen.CaptureScreen;
 import com.automationanywhere.botcommand.utilities.helios.CloudMediaMode;
 import com.automationanywhere.botcommand.utilities.helios.ErrorMedia;
 import com.automationanywhere.botcommand.utilities.screen.recorder.CaptureResult;
 import com.automationanywhere.commandsdk.annotations.*;
-import com.automationanywhere.commandsdk.annotations.rules.EntryList.EntryListAddButtonLabel;
-import com.automationanywhere.commandsdk.annotations.rules.EntryList.EntryListEmptyLabel;
-import com.automationanywhere.commandsdk.annotations.rules.EntryList.EntryListEntryUnique;
-import com.automationanywhere.commandsdk.annotations.rules.EntryList.EntryListLabel;
 import com.automationanywhere.commandsdk.annotations.rules.NotEmpty;
 import com.automationanywhere.commandsdk.annotations.rules.SelectModes;
 import com.automationanywhere.commandsdk.annotations.rules.SessionObject;
+import com.automationanywhere.commandsdk.annotations.rules.VariableMapAllowedDataTypes;
 import com.automationanywhere.commandsdk.model.AttributeType;
 import com.automationanywhere.commandsdk.model.DataType;
 import org.apache.logging.log4j.Level;
@@ -30,7 +26,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -58,15 +53,6 @@ public class LogMessage {
     private static final String LEVEL_WARN = "WARN";
     private static final String LOG_VARIABLE = "YES";
     private static final String DO_NOT_LOG_VARIABLE = "NO";
-
-    @Idx(index = "5.2.1.3", type = AttributeType.TEXT, name = "NAME")
-    @Pkg(label = "Name", default_value_type = DataType.STRING)
-    @NotEmpty
-    private String colName;
-
-    @Idx(index = "5.2.1.4", type = AttributeType.VARIABLE, name = "VALUE")
-    @Pkg(label = "Value", default_value_type = DataType.ANY)
-    private Value colValue;
 
     @GlobalSessionContext
     private com.automationanywhere.bot.service.GlobalSessionContext globalSessionContext;
@@ -121,44 +107,20 @@ public class LogMessage {
             @SelectModes
             String logVariable,
 
-            @Idx(index = "5.2.1", type = AttributeType.ENTRYLIST, options = {
-                    @Idx.Option(index = "5.2.1.1", pkg = @Pkg(title = "NAME", label = "Variable name/description",
-                            node_label = "{{NAME}}")),
-                    @Idx.Option(index = "5.2.1.2", pkg = @Pkg(title = "VALUE", label = "Variable Value", node_label =
-                            "{{VALUE}}")),
-            })
-            //Label you see at the top of the control
-            @Pkg(label = "Log following variables")
-            //Header of the entry form
-            @EntryListLabel(value = "Variable details")
-            //Button label which displays the entry form
-            @EntryListAddButtonLabel(value = "Add variable")
-            //Uniqueness rule for the column, this value is the TITLE of the column requiring uniqueness.
-            @EntryListEntryUnique(value = "NAME")
-            //Message to display in table when no entries are present.
-            @EntryListEmptyLabel(value = "No value to log")
-            List<Value> list,
-
             @Idx(index = "5.2.2", type = AttributeType.VARIABLEMAP)
-            @Pkg(label = "Common datatype variables to log")
+            @Pkg(label = "Variables to log", description = "Select variables with checkboxes. Use Custom selection for complex types; their By type labels can be blank.")
+            @VariableMapAllowedDataTypes({DataType.STRING, DataType.NUMBER, DataType.DATETIME, DataType.BOOLEAN,
+                    DataType.LIST, DataType.DICTIONARY, DataType.RECORD, DataType.TABLE, DataType.FILE})
             Map<String, Value> sourceMap
     ) {
         try {
-            Map<String, Value> variableValues = null;
+            Map<String, Value> variableValues = LOG_VARIABLE.equalsIgnoreCase(logVariable) ? sourceMap : null;
             String screenshotPath = "";
             String videoPosterPath = "";
             String videoPath = "";
 
             // Convert string log level to Log4j Level
             Level log4jLevel = convertToLog4jLevel(logLevel);
-
-            if (logVariable.equalsIgnoreCase(LOG_VARIABLE)) {
-                if (sourceMap != null && !sourceMap.isEmpty()) {
-                    variableValues = DataConversion.getMergedDictionary(list, sourceMap);
-                } else {
-                    variableValues = DataConversion.getMergedDictionary(list);
-                }
-            }
 
             if (!LEVEL_INFO.equals(logLevel) && !LEVEL_WARN.equals(logLevel) && !LEVEL_ERROR.equals(logLevel))
                 throw new BotCommandException("Invalid log level");

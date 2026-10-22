@@ -181,11 +181,11 @@ public class InheritedErrorMediaTest {
         CustomLogger video = logger(root, false, 5, Set.of(Level.INFO, Level.WARN, Level.ERROR), EncodingMode.FAST, server.config());
         String id = video.getLoggerId();
         try {
-            action.action(video, "INFO", "local INFO flag", false, "NO", null, null);
-            action.action(video, "WARN", "local WARN flag", false, "NO", null, null);
-            Assert.assertEquals(action.action(video, "ERROR", "first ERROR", false, "NO", null, null).get(), "");
-            action.action(video, "INFO", "recovered", false, "NO", null, null);
-            action.action(video, "ERROR", "second ERROR", false, "NO", null, null);
+            action.action(video, "INFO", "local INFO flag", false, "NO", null);
+            action.action(video, "WARN", "local WARN flag", false, "NO", null);
+            Assert.assertEquals(action.action(video, "ERROR", "first ERROR", false, "NO", null).get(), "");
+            action.action(video, "INFO", "recovered", false, "NO", null);
+            action.action(video, "ERROR", "second ERROR", false, "NO", null);
         } finally { video.close(); }
         List<JSONObject> rows = server.rows.get(id);
         Assert.assertEquals(rows.size(), 5);
@@ -200,7 +200,7 @@ public class InheritedErrorMediaTest {
         }
         CustomLogger screenshot = logger(root, true, 90, Set.of(Level.INFO, Level.WARN), EncodingMode.COMPACT, server.config());
         String stillId = screenshot.getLoggerId();
-        try { action.action(screenshot, "ERROR", "ERROR unchecked", false, "NO", null, null); }
+        try { action.action(screenshot, "ERROR", "ERROR unchecked", false, "NO", null); }
         finally { screenshot.close(); }
         JSONArray media = server.rows.get(stillId).get(0).getJSONArray("media");
         Assert.assertEquals(media.length(), 1);
@@ -218,7 +218,8 @@ public class InheritedErrorMediaTest {
                 if (path.length == 4) {
                     String id = body.getString("loggerSessionId");
                     rows.putIfAbsent(id, new CopyOnWriteArrayList<>());
-                    reply = new JSONObject().put("sessionId", id).put("media", new JSONObject().put("version", 1)
+                    reply = new JSONObject().put("sessionId", id).put("executionSessionId", "66666666-7777-8888-9999-000000000000")
+                            .put("executionId", body.getString("executionId")).put("media", new JSONObject().put("version", 1)
                             .put("maxScreenshotBytes", 1048576).put("maxVideoBytes", 8388608));
                 } else if (path.length == 8) {
                     reply = new JSONObject(body.toString()).put("sessionId", path[4]).put("ordinal", Integer.parseInt(path[6]))

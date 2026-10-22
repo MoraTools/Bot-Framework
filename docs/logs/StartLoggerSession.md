@@ -26,6 +26,8 @@
 * **Description:** The path to the log file where all logs (INFO, WARN, ERROR) will be stored.
 * **Constraints:** Must be a local file path ending with the `.html` extension. Cannot be empty.
 
+Each HTML file has an OS ownership lock. Sessions in the same JVM can share it. A start from another process is rejected before append or migration. The owner writes a local `WARN` on its next log call or close. This warning does not reach Helios, advance its ordinal, change its result, or capture media. The last session to close releases the lock.
+
 ### INFO logs file path
 
 * **Condition:** Required if "Append option for different levels of log" is set to `Custom Configuration`.
@@ -54,15 +56,17 @@
 * **Description:** The maximum number of log entries written to a single log file before it is rolled over (archived and a new one started).
 * **Constraints:** Must be a number greater than 0.
 
-Variable tables do not add to the entry count. Complete logs remain appendable across sessions. An old-format or incomplete active file is moved intact to the next numbered archive before a fresh log is opened. Existing archives and old variable pages remain unchanged. If that move fails, session startup reports an error instead of altering the existing file.
+Variable tables do not add to the entry count. Each file shows Machine and User once in a sticky header. Complete format-6 logs remain appendable across sessions with the same Machine and User. An old-format or incomplete active file, or one with a different identity, is moved intact to the next numbered archive before a fresh log is opened. All original bytes, existing archives, and old variable pages remain unchanged. If that move fails, session startup reports an error instead of altering the existing file.
 
 ### Screen recording
 
 * **Type:** `Select`
 * **Options:**
   * `No video`: Disable screen recording. The session behaves as a logger only.
-  * `Capture rolling video`: Continuously capture the desktop into a rolling buffer in the background. For each log entry at one of the selected levels below, the last N seconds are saved as an MP4 placed next to the log file. On JVM crash, the buffer at the moment of death is salvaged into a `crash-recording-<sessionId>.mp4` on the next bot startup. Windows-only; primary monitor only. If the recorder fails to start, the session degrades silently to the existing screenshot-only path.
+  * `Capture rolling video`: Continuously capture the desktop into a rolling buffer in the background. For each log entry at one of the selected levels below, the last N seconds are saved as an MP4 placed next to the log file. On JVM crash, the next recorder startup attempts to recover complete buffered segments into a `crash-recording-<sessionId>.mp4`. Windows-only; primary monitor only. If the recorder fails to start, the session degrades silently to the existing screenshot-only path.
 * **Default:** `No video`
+
+Completed segments follow FFmpeg's segment-list order. Old recorder folders without a list use modification-time order. Interrupted recovery resumes from `.salvaging` on a later recorder startup; existing cleanup rules still apply to corrupt or failed recordings. Concurrent FFmpeg extraction uses a process lock and a unique temporary file. See [Bundled FFmpeg](../../README.md#bundled-ffmpeg).
 
 ### Record video on INFO entries
 
@@ -136,6 +140,8 @@ When streaming is enabled the action creates a local disk journal. A background 
 * **Entries** `POST {url}/api/ingest/sessions/{id}/entries`, one envelope per entry, carrying the same timestamp, level, source, task, machine, user, message, variable count and screenshot/clip path that the HTML row shows. Every ERROR also declares media: video and a screenshot when ERROR recording is active, otherwise a screenshot. Local media paths remain in the row.
 * **Session end** `POST {url}/api/ingest/sessions/{id}/end`, sent by `Stop Logger Session`.
 
+An inherited Logger Session shares its identity and ordinal counter. A new `Start Logger Session` creates a separate stream under the same AA execution. Helios must return distinct `sessionId` and `executionSessionId` UUIDs and confirm the AA `executionId`. Older servers that cannot confirm separate streams leave new journals on disk without verified delivery. Old journals without `loggerSessionId` can still replay. Servers without `sessionIdentity` support receive Machine and User in each row. Helios Cloud 0.7.1 is compatible. See [the stream contract](../../README.md#what-is-sent).
+
 **Inherited ERROR media.** There is no separate media selector. A requested ERROR video uses the existing
 5-90 second buffer and FAST/COMPACT codec. No video does not start another recorder. Failed capture or encoding
 preserves the ERROR row and reports unavailable media. Video keeps its independent poster, including when the
@@ -165,6 +171,4 @@ Throws `BotCommandException` if:
 
 If the screen recorder fails to start (for example, when running headless or when the bundled ffmpeg cannot extract), the session degrades silently to the existing screenshot-only path rather than failing the bot.
 
-Helios Cloud streaming never raises `BotCommandException`. Any ingest failure is reported as a single WARN row in the HTML log.
-
-Children that use an inherited Logger Session share its identity and ordinal counter. A new Start Logger Session in a child creates a separate stream under the same AA execution.
+Helios delivery delays and failures are reported once per logger session as a local `WARN`. A failure to save an entry adds an incomplete-log warning even after an earlier delivery warning. These diagnostics are not streamed and do not advance the ordinal or change the session result.

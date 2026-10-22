@@ -40,7 +40,6 @@ public class EntryCountRotationTest {
 
     private String baseTestPath;
     private Map<String, Value> sourceMap;
-    private List<Value> entryList;
     private LogMessage logMessage;
     private StopLoggerSession stopLoggerSession;
 
@@ -60,42 +59,29 @@ public class EntryCountRotationTest {
     }
 
     private void setupTestVariables() {
-        // Create source map for common variables
+        // Create the selected variable map.
         sourceMap = new HashMap<>();
         sourceMap.put("stringVar", new StringValue("Entry-based rotation test"));
         sourceMap.put("numberVar", new NumberValue(42));
         sourceMap.put("booleanVar", new BooleanValue(true));
         sourceMap.put("dateVar", new DateTimeValue(ZonedDateTime.now()));
 
-        // Create entry list for more complex variables
-        entryList = new ArrayList<>();
-
         // String variable entry
-        Map<String, Value> variable1 = new HashMap<>();
-        variable1.put("NAME", new StringValue("Test String"));
-        variable1.put("VALUE", new StringValue("Entry rotation variable"));
-        entryList.add(new DictionaryValue(variable1));
+        sourceMap.put("Test String", new StringValue("Entry rotation variable"));
 
         // Number variable entry
-        Map<String, Value> variable2 = new HashMap<>();
-        variable2.put("NAME", new StringValue("Entry Count"));
-        variable2.put("VALUE", new NumberValue(5));
-        entryList.add(new DictionaryValue(variable2));
+        sourceMap.put("Entry Count", new NumberValue(5));
 
         // List variable with nested values
-        Map<String, Value> variable3 = new HashMap<>();
         List<Value> listValues = new ArrayList<>();
         listValues.add(new StringValue("First"));
         listValues.add(new StringValue("Second"));
         listValues.add(new NumberValue(100));
         ListValue listValue = new ListValue();
         listValue.set(listValues);
-        variable3.put("NAME", new StringValue("List Data"));
-        variable3.put("VALUE", listValue);
-        entryList.add(new DictionaryValue(variable3));
+        sourceMap.put("List Data", listValue);
 
         // Table variable
-        Map<String, Value> variable4 = new HashMap<>();
         List<Schema> schemas = new ArrayList<>();
         schemas.add(new Schema("ID"));
         schemas.add(new Schema("Type"));
@@ -107,9 +93,7 @@ public class EntryCountRotationTest {
 
         TableValue tableValue = new TableValue();
         tableValue.set(new Table(schemas, rows));
-        variable4.put("NAME", new StringValue("Rotation Types"));
-        variable4.put("VALUE", tableValue);
-        entryList.add(new DictionaryValue(variable4));
+        sourceMap.put("Rotation Types", tableValue);
     }
 
     @AfterClass
@@ -149,7 +133,6 @@ public class EntryCountRotationTest {
                 "Test log entry " + i + " with entry-based rotation",
                 captureScreenshot,
                 logVariables,
-                entryList,
                 sourceMap
             );
         }
@@ -200,7 +183,6 @@ public class EntryCountRotationTest {
                 "INFO: Application started with entry-based rotation - iteration " + i,
                 i == 2,  // capture screenshot on iteration 2
                 i == 3 ? LOG_VARIABLE : DO_NOT_LOG_VARIABLE,
-                entryList,
                 sourceMap
             );
 
@@ -211,7 +193,6 @@ public class EntryCountRotationTest {
                 "WARN: Memory usage above threshold - iteration " + i,
                 true,  // always capture screenshot for warnings
                 DO_NOT_LOG_VARIABLE,
-                null,
                 null
             );
 
@@ -222,7 +203,6 @@ public class EntryCountRotationTest {
                 "ERROR: Failed to process request - iteration " + i,
                 i % 2 == 0,  // screenshot on even iterations
                 i == 4 ? LOG_VARIABLE : DO_NOT_LOG_VARIABLE,
-                entryList,
                 sourceMap
             );
         }
@@ -273,8 +253,7 @@ public class EntryCountRotationTest {
                 LEVEL_INFO,
                 "Rich content entry " + i + " - Testing rotation with screenshots and variables",
                 true,  // always capture screenshot
-                LOG_VARIABLE,  // always log variables
-                entryList,
+                LOG_VARIABLE,
                 sourceMap
             );
         }
@@ -332,8 +311,7 @@ public class EntryCountRotationTest {
             LEVEL_INFO,
             "Testing screenshot and variable capture",
             true,  // capture screenshot
-            LOG_VARIABLE,  // log variables
-            entryList,
+            LOG_VARIABLE,
             sourceMap
         );
 

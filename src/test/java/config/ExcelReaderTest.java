@@ -3,10 +3,19 @@ package config;
 import com.automationanywhere.botcommand.actions.config.ExcelReader;
 import com.automationanywhere.botcommand.data.impl.DictionaryValue;
 import com.automationanywhere.botcommand.exception.BotCommandException;
+import org.apache.poi.ss.usermodel.Cell;
+import org.apache.poi.ss.usermodel.CellStyle;
+import org.apache.poi.ss.usermodel.Row;
+import org.apache.poi.ss.usermodel.Sheet;
+import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.testng.Assert;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
+
+import java.io.OutputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 /**
  * @author Sumit Kumar
@@ -217,5 +226,51 @@ public class ExcelReaderTest {
                 COLUMN_AGE,
                 false
         );
+    }
+
+    @Test
+    public void testFormulaCellsUseSavedValuesWithoutCalculation() throws Exception {
+        Path file = Files.createTempFile("excel-cached-formulas-", ".xlsx");
+        try {
+            try (XSSFWorkbook workbook = new XSSFWorkbook()) {
+                Sheet sheet = workbook.createSheet("Config");
+                Row header = sheet.createRow(0);
+                header.createCell(0).setCellFormula("\"calculated header\"");
+                header.getCell(0).setCellValue("key");
+                header.createCell(1).setCellValue("value");
+
+                Row numericRow = sheet.createRow(1);
+                numericRow.createCell(0).setCellValue("numeric");
+                Cell numericCell = numericRow.createCell(1);
+                numericCell.setCellFormula("1+1");
+                numericCell.setCellValue(17);
+                CellStyle numericStyle = workbook.createCellStyle();
+                numericStyle.setDataFormat(workbook.createDataFormat().getFormat("0.00"));
+                numericCell.setCellStyle(numericStyle);
+
+                Row stringRow = sheet.createRow(2);
+                stringRow.createCell(0).setCellFormula("\"calculated key\"");
+                stringRow.getCell(0).setCellValue("saved key");
+                stringRow.createCell(1).setCellFormula("\"calculated value\"");
+                stringRow.getCell(1).setCellValue(" saved value ");
+
+                Row normalRow = sheet.createRow(3);
+                normalRow.createCell(0).setCellValue("normal");
+                normalRow.createCell(1).setCellValue(" normal value ");
+                try (OutputStream output = Files.newOutputStream(file)) {
+                    workbook.write(output);
+                }
+            }
+
+            for (String parsingMethod : new String[]{COLUMN_HEADER, COLUMN_INDEX}) {
+                DictionaryValue result = excelReader.action(file.toString(), SELECT_BY_NAME, "Config", null,
+                        false, null, parsingMethod, 0.0, 1.0, "key", "value", true);
+                Assert.assertEquals(result.get("numeric").get(), "17.00");
+                Assert.assertEquals(result.get("saved key").get(), "saved value");
+                Assert.assertEquals(result.get("normal").get(), "normal value");
+            }
+        } finally {
+            Files.deleteIfExists(file);
+        }
     }
 }

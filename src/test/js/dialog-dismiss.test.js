@@ -3,7 +3,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-const html = fs.readFileSync(path.join(__dirname, '../../main/resources/templates/log.html'), 'utf8');
+const htmlPath = process.argv[2] || path.join(__dirname, '../../main/resources/templates/log.html');
+const html = fs.readFileSync(htmlPath, 'utf8');
 const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 assert.match(html, /<dialog\b[^>]*\bclosedby='any'/);
 
@@ -77,4 +78,4 @@ for (const reset of ['pointercancel', 'close', 'click']) {
 const noPointer = boot(false);
 noPointer.emit('click');
 assert.equal(noPointer.dialog.open, true, 'a click without a pointerdown does not dismiss');
-console.log('PASS: native setup, Close button, 14 pointer cases, gesture resets, and media cleanup');
+console.log(`PASS (${htmlPath}): native setup, Close button, 14 pointer cases, gesture resets, and media cleanup`);

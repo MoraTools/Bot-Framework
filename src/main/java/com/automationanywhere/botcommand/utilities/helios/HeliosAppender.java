@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Snapshots log values to disk on the caller thread; HTTP never runs on that thread. */
 public final class HeliosAppender extends AbstractAppender {
-    private final HeliosJsonLayout layout = new HeliosJsonLayout();
+    private final HeliosJsonLayout layout;
     private final Logger logger;
     private static final String DIAGNOSTIC = "HELIOS_LOCAL_DIAGNOSTIC";
     private final AtomicBoolean warned = new AtomicBoolean();
@@ -32,6 +32,7 @@ public final class HeliosAppender extends AbstractAppender {
     public HeliosAppender(String name, HeliosConfig config, Logger logger, String loggerSessionId) {
         super(name, MarkerFilter.createFilter(DIAGNOSTIC, Filter.Result.DENY, Filter.Result.NEUTRAL),
                 null, true, Property.EMPTY_ARRAY);
+        layout = config == null ? new HeliosJsonLayout() : new HeliosJsonLayout(config.machine, config.user);
         this.logger = logger;
         try {
             sink = new HeliosSink(config, Paths.get(System.getProperty("helios.outbox.directory",
@@ -43,7 +44,7 @@ public final class HeliosAppender extends AbstractAppender {
     }
 
     @Override public synchronized void append(LogEvent event) {
-        if (finished) return;
+        if (finished || event.getMarker() != null && event.getMarker().isInstanceOf(DIAGNOSTIC)) return;
         int ordinal = expectedEntries++;
         if (sink == null) return;
         try {
@@ -103,6 +104,10 @@ public final class HeliosAppender extends AbstractAppender {
     }
 
     private void writeWarning(String message) {
+        writeLocalWarning(logger, message);
+    }
+
+    public static void writeLocalWarning(Logger logger, String message) {
         Map<String, Object> row = new HashMap<>();
         row.put(CustomHTMLLayout.Columns.MESSAGE, message);
         row.put(CustomHTMLLayout.Columns.SOURCE, "");

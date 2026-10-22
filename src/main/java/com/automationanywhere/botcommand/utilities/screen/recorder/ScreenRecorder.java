@@ -550,6 +550,7 @@ public abstract class ScreenRecorder implements AutoCloseable {
                             StandardCopyOption.COPY_ATTRIBUTES, StandardCopyOption.REPLACE_EXISTING);
                     else copyAdmittedSegment(seg, scratchDir.resolve(seg.getFileName()), admittedSizes.get(seg));
                 }
+                ClipFinalizer.writeSegmentOrder(scratchDir, segments);
                 Path target = logDir.resolve("clips").resolve(errorUuid + ".mp4");
                 CaptureResult capture = new CaptureResult(errorUuid, target, scratchDir, null);
                 created = capture;
@@ -668,17 +669,11 @@ public abstract class ScreenRecorder implements AutoCloseable {
         }
 
         /**
-         * Returns the ring's complete segments, oldest first. The most recently
-         * written segment is dropped because stage-1 may still be writing to it -
-         * including a partial segment with an incomplete moov atom can break
-         * stage-2's concat demuxer.
+         * Returns completed segments in FFmpeg's list order, excluding the next
+         * ring slot because stage-1 can already be writing to its old filename.
          */
         private List<Path> stableSegments() throws IOException {
-            List<Path> all = ClipFinalizer.listMovFilesByMtimeAsc(ringDir);
-            if (all.size() <= 1) {
-                return java.util.Collections.emptyList();
-            }
-            return new java.util.ArrayList<>(all.subList(0, all.size() - 1));
+            return ClipFinalizer.completedRingSegments(ringDir, bufferSeconds);
         }
 
         /**

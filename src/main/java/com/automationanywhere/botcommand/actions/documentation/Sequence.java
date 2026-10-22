@@ -43,7 +43,7 @@ public class Sequence {
     @Idx(index = "3.1", type = AttributeType.TEXTAREA)
     @Pkg(label = "Detail about captured image")
     @Inject
-    Image sequenceImageText1;
+    String sequenceImageText1;
     @Idx(index = "3.2", type = AttributeType.IMAGE)
     @Pkg(label = "")
     @Inject
@@ -55,7 +55,7 @@ public class Sequence {
     @Idx(index = "4.1", type = AttributeType.TEXTAREA)
     @Pkg(label = "Detail about captured image")
     @Inject
-    Image sequenceImageText2;
+    String sequenceImageText2;
     @Idx(index = "4.2", type = AttributeType.IMAGE)
     @Pkg(label = "")
     @Inject
@@ -67,7 +67,7 @@ public class Sequence {
     @Idx(index = "5.1", type = AttributeType.TEXTAREA)
     @Pkg(label = "Detail about captured image")
     @Inject
-    Image sequenceImageText3;
+    String sequenceImageText3;
     @Idx(index = "5.2", type = AttributeType.IMAGE)
     @Pkg(label = "")
     @Inject
@@ -93,7 +93,7 @@ public class Sequence {
         this.sequenceDescription = sequenceDescription;
     }
 
-    public void setSequenceImageText1(Image sequenceImageText1) {
+    public void setSequenceImageText1(String sequenceImageText1) {
         this.sequenceImageText1 = sequenceImageText1;
     }
 
@@ -101,7 +101,7 @@ public class Sequence {
         this.sequenceImage1 = sequenceImage1;
     }
 
-    public void setSequenceImageText2(Image sequenceImageText2) {
+    public void setSequenceImageText2(String sequenceImageText2) {
         this.sequenceImageText2 = sequenceImageText2;
     }
 
@@ -109,7 +109,7 @@ public class Sequence {
         this.sequenceImage2 = sequenceImage2;
     }
 
-    public void setSequenceImageText3(Image sequenceImageText3) {
+    public void setSequenceImageText3(String sequenceImageText3) {
         this.sequenceImageText3 = sequenceImageText3;
     }
 

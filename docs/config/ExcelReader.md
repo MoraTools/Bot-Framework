@@ -13,6 +13,8 @@ Read values from an Excel file and store them in a dictionary format. Excel appl
 - Offers options for parsing based on column indexes or headers.
 - Provides functionality to handle password-protected Excel files.
 - Allows trimming of values before storing in the resulting dictionary.
+- Formula cells return their saved calculated values with the cell format applied. This command does not calculate
+  formulas. Save calculated values in the workbook before reading it.
 
 ## Parameters
 

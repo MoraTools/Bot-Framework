@@ -43,7 +43,7 @@ public class CautionSequence {
     @Idx(index = "3.1", type = AttributeType.TEXTAREA)
     @Pkg(label = "Detail about captured image")
     @Inject
-    Image cautionSequenceText1;
+    String cautionSequenceText1;
     @Idx(index = "3.2", type = AttributeType.IMAGE)
     @Pkg(label = "")
     @Inject
@@ -55,7 +55,7 @@ public class CautionSequence {
     @Idx(index = "4.1", type = AttributeType.TEXTAREA)
     @Pkg(label = "Detail about captured image")
     @Inject
-    Image cautionSequenceText2;
+    String cautionSequenceText2;
     @Idx(index = "4.2", type = AttributeType.IMAGE)
     @Pkg(label = "")
     @Inject
@@ -67,7 +67,7 @@ public class CautionSequence {
     @Idx(index = "5.1", type = AttributeType.TEXTAREA)
     @Pkg(label = "Detail about captured image")
     @Inject
-    Image cautionSequenceText3;
+    String cautionSequenceText3;
     @Idx(index = "5.2", type = AttributeType.IMAGE)
     @Pkg(label = "")
     @Inject
@@ -93,7 +93,7 @@ public class CautionSequence {
         this.cautionSequenceDescription = cautionSequenceDescription;
     }
 
-    public void setCautionSequenceText1(Image cautionSequenceText1) {
+    public void setCautionSequenceText1(String cautionSequenceText1) {
         this.cautionSequenceText1 = cautionSequenceText1;
     }
 
@@ -101,7 +101,7 @@ public class CautionSequence {
         this.cautionSequenceImage1 = cautionSequenceImage1;
     }
 
-    public void setCautionSequenceText2(Image cautionSequenceText2) {
+    public void setCautionSequenceText2(String cautionSequenceText2) {
         this.cautionSequenceText2 = cautionSequenceText2;
     }
 
@@ -109,7 +109,7 @@ public class CautionSequence {
         this.cautionSequenceImage2 = cautionSequenceImage2;
     }
 
-    public void setCautionSequenceText3(Image cautionSequenceText3) {
+    public void setCautionSequenceText3(String cautionSequenceText3) {
         this.cautionSequenceText3 = cautionSequenceText3;
     }
 

@@ -16,6 +16,11 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.zip.GZIPOutputStream;
 import java.util.List;
+import java.util.Locale;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.Map;
 import java.util.regex.Pattern;
 
@@ -43,8 +48,8 @@ public class HTMLGenerator {
         String escaped = StringEscapeUtils.escapeHtml4(s);
 
         escaped = TRAILING_SPACES.matcher(escaped).replaceAll(match ->
-                "<span class='ws-marker ws-trail' aria-hidden='true'>"
-                        + "·".repeat(match.end() - match.start()) + "</span>");
+                "<span class='ws-trail'><span class='ws-marker' aria-hidden='true'>"
+                        + "·".repeat(match.end() - match.start()) + "</span>" + match.group() + "</span>");
 
         if (escaped.indexOf('\t') >= 0) {
             escaped = escaped.replace("\t", TAB_MARKER);
@@ -63,9 +68,9 @@ public class HTMLGenerator {
         if (value == null) {
             return NULL;
         }
-        return value.getClass().getSimpleName().toLowerCase()
+        return value.getClass().getSimpleName().toLowerCase(Locale.ROOT)
                 .replace("object", "")
-                .replace("value", "").toUpperCase();
+                .replace("value", "").toUpperCase(Locale.ROOT);
     }
 
     /** Renders a complete variable snapshot inside its log entry, without file I/O. */
@@ -74,11 +79,11 @@ public class HTMLGenerator {
         StringBuilder html = new StringBuilder("<details class='entry-variables'><summary>");
         html.append("<span class='variable-count'>").append(valueMap.size())
                 .append(valueMap.size() == 1 ? " variable" : " variables")
-                .append("</span></summary><div class='variable-list'>\n");
+                .append("</span></summary><div class='variable-list'>");
         for (Map.Entry<String, Value> entry : valueMap.entrySet()) {
             appendVariableCard(entry.getKey() == null ? NULL : entry.getKey(), entry.getValue(), html, true);
         }
-        return html.append("</div></details>\n").toString();
+        return html.append("</div></details>").toString();
     }
 
     /** Stores one lossless snapshot; the shared dialog expands it only when requested. */
@@ -97,45 +102,45 @@ public class HTMLGenerator {
     }
 
     private static void appendVariableCard(String name, Value value, StringBuilder htmlBuilder, boolean showNullType) {
-        htmlBuilder.append("<div class='variable-card'>\n")
+        htmlBuilder.append("<div class='variable-card'>")
                 .append("<div class='variable-name'>")
                 .append(StringEscapeUtils.escapeHtml4(name))
-                .append("</div>\n");
+                .append("</div>");
 
         if (value != null || showNullType) {
-            htmlBuilder.append("<div class='variable-type'>")
+            htmlBuilder.append(" <div class='variable-type'>")
                     .append(StringEscapeUtils.escapeHtml4(typeLabel(value)))
-                    .append("</div>\n");
+                    .append("</div>");
         }
         appendVariableValueWithoutCard(value, htmlBuilder);
-        htmlBuilder.append("</div>\n");
+        htmlBuilder.append("</div>");
     }
 
     private static void appendListValue(ListValue listValue, StringBuilder htmlBuilder) {
         List<Value> list = listValue.get();
 
-        htmlBuilder.append("<details>\n")
+        htmlBuilder.append("<details>")
                 .append("<summary>List: ")
                 .append(list.size())
-                .append(" items</summary>\n");
+                .append(" items</summary>");
 
         if (!list.isEmpty()) {
             // Wrap children so a single continuous thread-line on the left
             // (rendered via summary::after) sits next to them with padding,
             // and the children push to the right of the line.
-            htmlBuilder.append("<div class='nested-content'>\n");
+            htmlBuilder.append("<div class='nested-content'>");
             for (int i = 0; i < list.size(); i++) {
                 appendVariableCard("Index " + i, list.get(i), htmlBuilder, false);
             }
-            htmlBuilder.append("</div>\n");
+            htmlBuilder.append("</div>");
         }
 
-        htmlBuilder.append("</details>\n");
+        htmlBuilder.append("</details>");
     }
 
     private static void appendVariableValueWithoutCard(Value value, StringBuilder htmlBuilder) {
-        if (value == null) {
-            htmlBuilder.append("<div class='variable-value'>NULL</div>\n");
+        if (value == null || value.get() == null) {
+            htmlBuilder.append("<div class='variable-value'>NULL</div>");
             return;
         }
 
@@ -163,92 +168,92 @@ public class HTMLGenerator {
     private static void appendDictionaryValue(DictionaryValue dictionaryValue, StringBuilder htmlBuilder) {
         Map<String, Value> dictionaryMap = dictionaryValue.get();
 
-        htmlBuilder.append("<details>\n")
+        htmlBuilder.append("<details>")
                 .append("<summary>Dictionary: ")
                 .append(dictionaryMap.size())
-                .append(" entries</summary>\n");
+                .append(" entries</summary>");
 
         if (!dictionaryMap.isEmpty()) {
-            htmlBuilder.append("<div class='nested-content'>\n");
+            htmlBuilder.append("<div class='nested-content'>");
             for (Map.Entry<String, Value> entry : dictionaryMap.entrySet()) {
                 appendVariableCard(entry.getKey(), entry.getValue(), htmlBuilder, false);
             }
-            htmlBuilder.append("</div>\n");
+            htmlBuilder.append("</div>");
         }
 
-        htmlBuilder.append("</details>\n");
+        htmlBuilder.append("</details>");
     }
 
     private static void appendRecordValue(RecordValue recordValue, StringBuilder htmlBuilder) {
         Record record = recordValue.get();
 
-        htmlBuilder.append("<details class='full-width'>\n")
+        htmlBuilder.append("<details class='full-width'>")
                 .append("<summary>Record: ")
                 .append(record.getSchema().size())
-                .append(" columns</summary>\n")
-                .append("<div class='table-container' tabindex='0' role='region' aria-label='Record values'>\n")
-                .append("<table>\n")
-                .append("<tr>\n");
+                .append(" columns</summary>")
+                .append("<div class='table-container' tabindex='0' role='region' aria-label='Record values'>")
+                .append("<table>")
+                .append("<tr>");
 
         appendSchemaHeaders(record.getSchema(), htmlBuilder);
-        htmlBuilder.append("<tr>\n");
+        htmlBuilder.append("<tr>");
         appendCells(record.getValues(), htmlBuilder);
 
-        htmlBuilder.append("</tr>\n")
-                .append("</table>\n")
-                .append("</div>\n")
-                .append("</details>\n");
+        htmlBuilder.append("</tr>")
+                .append("</table>")
+                .append("</div>")
+                .append("</details>");
     }
 
     private static void appendTableValue(TableValue tableValue, StringBuilder htmlBuilder) {
         Table table = tableValue.get();
 
-        htmlBuilder.append("<details class='full-width'>\n")
+        htmlBuilder.append("<details class='full-width'>")
                 .append("<summary>Table: ")
                 .append(table.getRows().size())
                 .append(" rows x ")
                 .append(table.getSchema().size())
-                .append(" columns</summary>\n")
-                .append("<div class='table-container' tabindex='0' role='region' aria-label='Table values'>\n")
-                .append("<table>\n")
-                .append("<tr>\n");
+                .append(" columns</summary>")
+                .append("<div class='table-container' tabindex='0' role='region' aria-label='Table values'>")
+                .append("<table>")
+                .append("<tr>");
 
         appendSchemaHeaders(table.getSchema(), htmlBuilder);
 
         // Add data rows with proper nested handling
         for (int i = 0; i < table.getRows().size(); i++) {
-            htmlBuilder.append("<tr>\n");
+            htmlBuilder.append("<tr>");
 
             appendCells(table.getRows().get(i).getValues(), htmlBuilder);
 
-            htmlBuilder.append("</tr>\n");
+            htmlBuilder.append("</tr>");
         }
 
-        htmlBuilder.append("</table>\n")
-                .append("</div>\n")
-                .append("</details>\n");
+        htmlBuilder.append("</table>")
+                .append("</div>")
+                .append("</details>");
     }
 
     private static void appendSchemaHeaders(List<Schema> schema, StringBuilder htmlBuilder) {
         for (Schema column : schema) {
             htmlBuilder.append("<th>")
                     .append(StringEscapeUtils.escapeHtml4(column.getName()))
-                    .append("</th>\n");
+                    .append("</th>");
         }
-        htmlBuilder.append("</tr>\n");
+        htmlBuilder.append("</tr>");
     }
 
     private static void appendCells(List<Value> values, StringBuilder htmlBuilder) {
         for (Value value : values) {
-            htmlBuilder.append("<td>\n");
+            htmlBuilder.append("<td>");
             appendValueInCell(value, htmlBuilder);
-            htmlBuilder.append("</td>\n");
+            htmlBuilder.append("</td>");
         }
     }
 
     // Helper method for table and record cells
     private static void appendValueInCell(Value value, StringBuilder htmlBuilder) {
-        if (value == null) {
+        if (value == null || value.get() == null) {
             htmlBuilder.append("NULL");
             return;
         }
@@ -279,16 +284,20 @@ public class HTMLGenerator {
 
         htmlBuilder.append("<div class='variable-value'>")
                 .append(escapeWithWhitespaceMarkers(objectStringValue))
-                .append("</div>\n");
+                .append("</div>");
     }
 
     public static String getScreenshotHTML(String screenshotPath) {
+        return getScreenshotHTML(screenshotPath, null);
+    }
+
+    private static String getScreenshotHTML(String screenshotPath, Path htmlDirectory) {
         if (screenshotPath == null || screenshotPath.isEmpty()) {
             return "";
         }
 
         // Create a relative path to the screenshot
-        String relativePath = "screenshots/" + FilenameUtils.getName(screenshotPath);
+        String relativePath = mediaHref(screenshotPath, "screenshots", htmlDirectory);
         String escapedRelativePath = StringEscapeUtils.escapeHtml4(relativePath);
 
         // Return a link to the screenshot
@@ -296,8 +305,24 @@ public class HTMLGenerator {
                 "aria-label='Screenshot' title='Screenshot' " +
                 "style='--screenshot-preview: url(\"" + escapedRelativePath + "\")'>" +
                 "<img src='" + escapedRelativePath + "' loading='lazy' decoding='async' " +
-                "width='88' height='50' alt='' />" +
+                "width='88' height='50' alt=''>" +
                 "</a>";
+    }
+
+    private static String mediaHref(String mediaPath, String folder, Path htmlDirectory) {
+        if (htmlDirectory == null) return folder + "/" + FilenameUtils.getName(mediaPath);
+        Path target = Paths.get(mediaPath).toAbsolutePath().normalize();
+        try {
+            String relative = htmlDirectory.toAbsolutePath().normalize().relativize(target)
+                    .toString().replace(java.io.File.separatorChar, '/');
+            // URL quoting also protects paths inside the CSS preview declaration.
+            return new URI(null, null, relative, null).toASCIIString()
+                    .replace("'", "%27").replace("(", "%28").replace(")", "%29");
+        } catch (IllegalArgumentException differentRoot) {
+            return target.toUri().toASCIIString().replace("'", "%27").replace("(", "%28").replace(")", "%29");
+        } catch (URISyntaxException invalidPath) {
+            throw new IllegalArgumentException("Cannot link log media: " + mediaPath, invalidPath);
+        }
     }
 
     /**
@@ -318,10 +343,15 @@ public class HTMLGenerator {
     public static String getScreenCellHTML(String screenshotPath,
                                            String videoPath,
                                            String videoPosterPath) {
+        return getScreenCellHTML(screenshotPath, videoPath, videoPosterPath, null);
+    }
+
+    public static String getScreenCellHTML(String screenshotPath, String videoPath,
+                                           String videoPosterPath, Path htmlDirectory) {
         if (videoPath != null && !videoPath.isEmpty()) {
-            String videoRel = "clips/" + FilenameUtils.getName(videoPath);
+            String videoRel = mediaHref(videoPath, "clips", htmlDirectory);
             String posterRel = (videoPosterPath != null && !videoPosterPath.isEmpty())
-                    ? "screenshots/" + FilenameUtils.getName(videoPosterPath)
+                    ? mediaHref(videoPosterPath, "screenshots", htmlDirectory)
                     : "";
             String videoEsc = StringEscapeUtils.escapeHtml4(videoRel);
             String posterEsc = StringEscapeUtils.escapeHtml4(posterRel);
@@ -335,7 +365,7 @@ public class HTMLGenerator {
             sb.append(">");
             if (!posterEsc.isEmpty()) {
                 sb.append("<img src='").append(posterEsc)
-                  .append("' loading='lazy' decoding='async' width='88' height='50' alt='' />");
+                  .append("' loading='lazy' decoding='async' width='88' height='50' alt=''>");
             }
             sb.append("<span class='play-overlay' aria-hidden='true'>&#9654;</span>")
               .append("</a>");
@@ -345,17 +375,17 @@ public class HTMLGenerator {
             // Recording was requested for this row but no clip is available.
             // Show the poster (a complete artifact in its own right) and a
             // small badge so the user knows why no play icon is present.
-            String posterRel = "screenshots/" + FilenameUtils.getName(videoPosterPath);
+            String posterRel = mediaHref(videoPosterPath, "screenshots", htmlDirectory);
             String posterEsc = StringEscapeUtils.escapeHtml4(posterRel);
             return "<a href='" + posterEsc + "' target='_blank' class='img-link video-unavailable' "
                     + "aria-label='Screenshot (video unavailable)' "
                     + "title='Video unavailable; opens screenshot' "
                     + "style='--screenshot-preview: url(\"" + posterEsc + "\")'>"
                     + "<img src='" + posterEsc
-                    + "' loading='lazy' decoding='async' width='88' height='50' alt='' />"
+                    + "' loading='lazy' decoding='async' width='88' height='50' alt=''>"
                     + "<span class='no-video-badge' aria-hidden='true'>no video</span>"
                     + "</a>";
         }
-        return getScreenshotHTML(screenshotPath);
+        return getScreenshotHTML(screenshotPath, htmlDirectory);
     }
 }

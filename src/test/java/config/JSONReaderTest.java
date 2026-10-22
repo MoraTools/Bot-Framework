@@ -159,6 +159,8 @@ public class JSONReaderTest {
         Assert.assertTrue(resultMap.containsKey("[0].friendAge"));
         Assert.assertEquals(resultMap.get("[0].friendName").toString(), "Alice");
         Assert.assertEquals(resultMap.get("[0].friendAge").toString(), "28");
+        Assert.assertEquals(resultMap.get("[1].friendName").toString(), "Bob");
+        Assert.assertEquals(resultMap.get("[1].interests[1]").toString(), "Gaming");
     }
 
     @Test
@@ -201,6 +203,34 @@ public class JSONReaderTest {
                 null,
                 false
         );
+    }
+
+    @Test
+    public void testNamedArraysKeepEveryIndex() {
+        Map<String, Value> result = jsonReader.action("TEXT", null, null,
+                "{\"x\":[1,2,3],\"nested\":[[\" first \",null],[\"last\"]],\"objects\":[{\"name\":\"A\"},{\"name\":\"B\"}]}",
+                "ALL", null, true).get();
+
+        Assert.assertEquals(result.get("x[0]").get(), "1");
+        Assert.assertEquals(result.get("x[1]").get(), "2");
+        Assert.assertEquals(result.get("x[2]").get(), "3");
+        Assert.assertEquals(result.get("nested[0].[0]").get(), "first");
+        Assert.assertEquals(result.get("nested[0].[1]").get(), "null");
+        Assert.assertEquals(result.get("nested[1].[0]").get(), "last");
+        Assert.assertEquals(result.get("objects[1].name").get(), "B");
+        Assert.assertEquals(result.size(), 8);
+    }
+
+    @Test
+    public void testSpecificArrayKeepsEveryIndexAndUntrimmedValues() {
+        Map<String, Value> result = jsonReader.action("TEXT", null, null,
+                "{\"config\":{\"values\":[\" first \",\" second \",\" third \"]}}",
+                "SPECIFIC", List.of(new StringValue("config"), new StringValue("values")), false).get();
+
+        Assert.assertEquals(result.get("[0]").get(), " first ");
+        Assert.assertEquals(result.get("[1]").get(), " second ");
+        Assert.assertEquals(result.get("[2]").get(), " third ");
+        Assert.assertEquals(result.size(), 3);
     }
 
     @Test(expectedExceptions = BotCommandException.class)

@@ -68,6 +68,7 @@ public final class HeliosSink {
         ZonedDateTime now = ZonedDateTime.now();
         JSONObject start = new JSONObject().put("executionId", config.executionId)
                 .put("loggerSessionId", loggerSessionId)
+                .put("sessionIdentity", true)
                 .put("botUri", config.botUri).put("parentBotUri", config.parentBotUri)
                 .put("fileId", config.fileId).put("machine", config.machine).put("user", config.user)
                 .put("startedAt", LOCAL_TIME.format(now)).put("utcOffsetMinutes", offsetMinutes(now));
@@ -155,6 +156,7 @@ public final class HeliosSink {
         long retryAt;
         long firstPendingAt;
         int failures;
+        boolean sessionIdentity;
         boolean refused;
         boolean replayed;
         int batchEntries = HeliosJournal.BATCH_ENTRIES;
@@ -166,8 +168,32 @@ public final class HeliosSink {
             if (refused || System.currentTimeMillis() < retryAt) return false;
             try {
                 if (sessionId == null) {
-                    JSONObject response = new JSONObject(post("/api/ingest/sessions", journal.start));
-                    sessionId = UUID.fromString(response.getString("sessionId")).toString();
+                    String reply = post("/api/ingest/sessions", journal.start);
+                    JSONObject response;
+                    try {
+                        response = new JSONObject(reply);
+                        String id = response.getString("sessionId");
+                        String streamId = UUID.fromString(id).toString();
+                        if (journal.start.has("loggerSessionId")) {
+                            String execution = response.getString("executionSessionId");
+                            String executionSessionId = UUID.fromString(execution).toString();
+                            String savedExecutionId = journal.start.getString("executionId");
+                            // Helios returns its stored execution ID, limited to 256 characters.
+                            if (!streamId.equalsIgnoreCase(id) || !executionSessionId.equalsIgnoreCase(execution)
+                                    || streamId.equals(executionSessionId)
+                                    || !savedExecutionId.substring(0, Math.min(savedExecutionId.length(), 256))
+                                            .equals(response.getString("executionId")))
+                                throw new IllegalArgumentException("Invalid stream response");
+                        }
+                        sessionId = streamId;
+                    } catch (RuntimeException unsupported) {
+                        if (!journal.start.has("loggerSessionId")) throw unsupported;
+                        refused = true;
+                        warning.accept("Helios did not confirm separate logger streams. Update Helios; "
+                                + "saved entries remain on disk for later delivery.");
+                        return false;
+                    }
+                    sessionIdentity = Boolean.TRUE.equals(response.opt("sessionIdentity"));
                     try { if (media != null) media.session(journal.path.getFileName().toString(), sessionId, response.optJSONObject("media")); }
                     catch (IOException mediaFailure) { warning.accept("Media session state could not be saved. JSON delivery continues; saved media is retained."); }
                 }
@@ -189,6 +215,14 @@ public final class HeliosSink {
                     JSONObject payload = new JSONObject(body.toString());
                     payload.remove("journalOffset");
                     payload.remove("journalFull");
+                    if (!sessionIdentity) {
+                        // Recover from this journal's identity, never the current runner's config.
+                        for (int index = 0; index < entries.length(); index++) {
+                            JSONObject entry = payload.getJSONArray("entries").getJSONObject(index);
+                            if (!entry.has("machine")) entry.put("machine", journal.start.optString("machine", ""));
+                            if (!entry.has("user")) entry.put("user", journal.start.optString("user", ""));
+                        }
+                    }
                     JSONObject receipt = new JSONObject(post(path + "/entries", payload));
                     int count = entries.length();
                     if (receipt.getInt("accepted") < 0 || receipt.getInt("duplicates") < 0
@@ -262,6 +296,7 @@ public final class HeliosSink {
         }
 
         private void delay(long serverDelay) {
+            warning.accept("Helios delivery was delayed. Saved entries retry from the disk journal.");
             long backoff = Math.min(30_000L, 1000L << failures);
             failures = Math.min(failures + 1, 5);
             long now = System.currentTimeMillis();

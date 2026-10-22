@@ -1,8 +1,14 @@
 # A360 Bot Framework Package
 
-**Version 4.5.2** - maintained by **jamir-boop**, forked from the original A360 Tools package.
+**Version 5.0.1** - maintained by **jamir-boop**, forked from the original A360 Tools package.
 
-4.5.2 shares variable-card rendering and logger setup. It keeps the existing log output, recording settings, and Helios behavior.
+5.0.1 fixes HTML output ownership, format migration, Helios stream confirmation, and recorder recovery.
+
+5.0.1 uses the native **Variables to log** checkboxes for String, Number, Datetime, Boolean, List, Dictionary, Record, Table, and File variables. Use **Custom** selection for complex types; their **By type** labels can be blank. Credential, Any, Session, Window, and Form variables are excluded.
+
+**Migration from 4.x:** The manual **Log following variables** NAME/VALUE list and its custom labels are removed. First, record each old NAME/VALUE mapping. Switch an isolated copy of the bot or action to 5.0.1, then select the same actual bot variables in **Custom** selection. Save, reopen, and test the copy before production use. Manual selections are not moved automatically. Existing checkbox selections stay valid. Keep the original bot pinned to the older package until the tested copy is ready; that bot keeps the old behavior. The 4.5.4 JAR remains available.
+
+4.5.4 reduces HTML log size with build-time CSS and JavaScript minification and compact entry markup. Machine and User stay in the sticky session header. The six columns are Datetime, Level, Source, Message, Variables, and Screen.
 
 ## Overview
 Designed to streamline bot development, enhance logging, and facilitate comprehensive documentation within tasks for A360. Tailored for efficiency, consistency, and ease of use, this package addresses common challenges in bot development and maintenance, making it an indispensable tool for modern automation projects.
@@ -27,12 +33,12 @@ Designed to streamline bot development, enhance logging, and facilitate comprehe
 - Log file separation per level: send all log levels to a single file, or split INFO / WARN / ERROR into separate files.
 - Screenshot capture alongside log messages for a complete logging experience.
 - Variable values are stored inside each HTML log entry. Select **Variables** to inspect names, types, nested containers, and tables in a shared dialog. The local snapshot keeps all logged values; Helios streaming limits do not apply to it.
-- **Rolling screen-recording buffer**: opt-in continuous capture of the last N seconds (5-90, default 30) of bot activity. When a log entry fires at a configured level (any combination of INFO/WARN/ERROR), the buffer is finalized into a browser-playable MP4 placed next to the log. Choose between **Fast** (H.264, larger files, faster encoding, recommended) and **Compact** (AV1, smaller files, slower encoding) per session. On JVM crash or drain timeout, both the rolling buffer and any pending per-error clips are salvaged on the next bot startup so the HTML log's video links self-heal at the paths they already reference.
+- **Rolling screen-recording buffer**: opt-in continuous capture of the last N seconds (5-90, default 30) of bot activity. When a log entry fires at a configured level (any combination of INFO/WARN/ERROR), the buffer is finalized into a browser-playable MP4 placed next to the log. Choose between **Fast** (H.264, larger files, faster encoding, recommended) and **Compact** (AV1, smaller files, slower encoding) per session. On JVM crash or drain timeout, the next recorder startup attempts to recover the rolling buffer and pending per-error clips at their original paths.
 
 ### [Helios Cloud Streaming](https://github.com/A360-Tools/Bot-Framework/blob/main/docs/logs/StartLoggerSession.md)
 - Opt-in per session: pick a Helios Cloud URL and an ingest key on `Start Logger Session`, and every entry is posted to the server while the bot runs.
-- Purely additive: the HTML log, screenshots, video clips and rollover are byte-for-byte the same whether streaming is on or off.
-- Never fails the bot: any ingest failure produces a single WARN row in the HTML log and nothing else.
+- HTML logging, screenshots, video clips, and rollover continue when streaming is enabled.
+- Delivery delays and failures produce a local WARN. Saved journals remain available for later delivery.
 
 ### [Config Data Reading](https://github.com/A360-Tools/Bot-Framework/tree/main/docs/config)
 - Reads configuration data from CSV, Excel, JSON, and XML formats into dictionaries.
@@ -86,11 +92,19 @@ Designed to streamline bot development, enhance logging, and facilitate comprehe
 
 ## Local HTML logs
 
-Each active or rotated HTML file contains its own styles and variable snapshots. Open it directly in a browser; no server or external stylesheet is required. Each variable snapshot is compressed inside the file. The Variables dialog requires JavaScript and a browser with `DecompressionStream('gzip')` support. Messages remain ordinary HTML for browser search and copy. Only the selected snapshot is decoded, and it is cleared when the dialog closes. New entries are visible after refreshing the page. Screenshots and recordings remain in `screenshots/` and `clips/` beside the log. Copy these folders with the HTML when media is needed.
+Machine and User stay visible above the scrolling table. The title and identity share one line on desktop and stack on small screens. The log follows the browser's light or dark theme.
+
+Each active or rotated HTML file contains its own styles and variable snapshots. Open it directly in a browser; no server or external stylesheet is required. Each variable snapshot is compressed inside the file. The Variables dialog requires JavaScript and a browser with `DecompressionStream('gzip')` support. Messages remain ordinary HTML for browser search and copy. Only the selected snapshot is decoded, and it is cleared when the dialog closes. New entries are visible after refreshing the page. Media links are resolved from each HTML file's directory to the actual screenshot or clip folder, including logs in separate folders. Copy the media folders with the HTML when media is needed.
+
+Message copy preserves spaces, tabs, line breaks, and trailing whitespace. Unset scalar values show `NULL`. Variable type labels stay uppercase in all locales. Timestamps use English month names and include the local numeric time-zone offset.
+
+The readable viewer source is `src/main/resources/templates/log.html`. Gradle minifies it into the packaged resource with Google Closure Compiler and ph-css on JDK 11. These tools are build-only dependencies. Building and running the package do not require Node.js or a runtime minifier.
 
 Entries are appended as complete blocks. Closing a session does not add a footer, and reopening a complete log keeps all existing bytes in place. Rollover counts log entries, including after a restart; rows inside a variable table do not count as extra entries. The existing maximum-entry setting still applies. Large variable snapshots increase the HTML file size and are not silently truncated.
 
-When an existing file uses an earlier HTML format or ends with an incomplete write, the next session moves that file intact to the next numbered archive (for example, `2_log.html`) and starts a fresh active file. Existing archives and old `variables/` pages are preserved. Migration stops if the file cannot be moved; it does not overwrite an archive or discard the incomplete bytes.
+Each HTML output file has an OS ownership lock. Sessions in the same JVM share it until the last session closes. Another process is rejected before append or migration. The rejected start leaves a notice. On its next log call or close, the owner writes a local `WARN`. This row does not reach Helios, advance the stream ordinal, change the session result, or trigger media capture.
+
+Current logs use HTML format 6. When an existing file uses an earlier format, has a different Machine or User, or ends with an incomplete write, the next session moves that file intact to the next numbered archive (for example, `2_log.html`) and starts a fresh active file. All original bytes, existing archives, and old `variables/` pages are preserved. Migration stops if the file cannot be moved; it does not overwrite an archive or discard the incomplete bytes.
 
 ## Helios Cloud streaming
 
@@ -108,17 +122,21 @@ Every logger session can optionally stream its entries live to a Helios Cloud se
 
 | Call | Payload |
 |---|---|
-| `POST {url}/api/ingest/sessions` | Execution id, bot URI, master Task Bot URI (empty when the logger runs in the master), Control Room file id, machine, user, local start time, UTC offset in minutes. |
+| `POST {url}/api/ingest/sessions` | AA execution id, stable `loggerSessionId`, `sessionIdentity`, bot URI, master Task Bot URI (empty when the logger runs in the master), Control Room file id, machine, user, local start time, UTC offset in minutes. |
 | `POST {url}/api/ingest/sessions/{id}/entries` | A batch of entries: first ordinal plus timestamp, UTC offset, level, source, task, machine, user, message, variable count, the logged variables and screenshot/clip path - the same values the HTML row shows. |
 | `POST {url}/api/ingest/sessions/{id}/end` | Sent by `Stop Logger Session` with `status` = the worst level logged (`ERROR`, `WARN` or `OK`) and `expectedEntries` for delivery verification. |
 
 The ingest key travels in the `X-Helios-Ingest-Key` header. Local media paths stay in the log rows. With streaming enabled, every ERROR also uploads media according to the Screen recording settings below.
 
+An inherited Logger Session shares its stream identity and ordinal counter. Each new `Start Logger Session` creates a separate stream under the same AA execution. Helios must confirm distinct UUIDs in `sessionId` and `executionSessionId`, and an `executionId` that matches the AA execution id sent by the runner (up to Helios' 256-character limit). Older servers that cannot confirm separate streams leave new journals on disk; delivery is not marked verified. Journals created before `loggerSessionId` was added can still replay.
+
+Servers that support separate streams but do not confirm `sessionIdentity` receive Machine and User in every entry. Helios Cloud 0.7.1 supports this contract.
+
 The variables logged with an entry are streamed with it, each as a name, a type label (`STRING`, `NUMBER`, `LIST`, `TABLE` ...) and a plain-text value; lists, dictionaries, records and tables render as JSON text. At most 100 variables per entry are sent and each value is cut at 8192 characters, flagged with `truncated`. `variablesCount` still reports how many were logged before the cap. Nothing is streamed when Helios Cloud streaming is disabled.
 
 ### Failure behaviour
 
-Streaming never fails the bot. Each entry is numbered and copied to a UTF-8 disk journal before network delivery. The background sender batches up to 50 entries or 256 KiB, or flushes after 2 seconds. A larger single entry travels alone, subject to the server's 5 MiB request limit. HTTP 413 splits a rejected batch; an oversized single entry remains on disk while later valid entries continue to send. Timeouts, HTTP 408/429 and server errors use retries with backoff and `Retry-After`; retries preserve the original ordinals and payloads.
+Streaming never fails the bot. Each entry is numbered and copied to a UTF-8 disk journal before network delivery. The background sender batches up to 50 entries or 256 KiB, or flushes after 2 seconds. A larger single entry travels alone, subject to the server's 5 MiB request limit. HTTP 413 splits a rejected batch; an oversized single entry remains on disk while later valid entries continue to send. Timeouts, HTTP 408/429 and server errors use retries with backoff and `Retry-After`; retries preserve the original ordinals and payloads. A retry delay or delivery failure emits one local `WARN` per logger session. If an entry cannot be saved, an additional incomplete-log warning is written even after an earlier delivery warning.
 
 `Stop Logger Session` saves the expected entry count and waits up to 5 seconds for delivery, plus up to 1 second to stop the sender. Helios verifies the complete sequence before confirming delivery. A missing entry triggers one full repair pass; duplicate ordinals are ignored. If the sequence is still incomplete, the journal is retained and recovery moves on to other sessions. The journal is deleted only after an explicit verified receipt. Pending journals retry at a later logger startup under the same operating-system user, Helios URL and ingest key. A crash without a closing record permits replay of saved entries, but cannot prove that the complete session was captured. Complete records before a damaged or truncated tail are sent; the journal stays unverified and is retained for inspection.
 
@@ -126,11 +144,15 @@ Journals live in `<user.home>/.helios/outbox/`, separate from HTML retention. Th
 
 The default limit is **256 MiB per session**. To raise it to 1 GiB, set the runner environment variable `HELIOS_BUFFER_MIB=1024` and restart the Bot Agent so new sessions inherit it. Values from 1 to 65536 MiB are supported. The Java system property `helios.bufferMiB` takes precedence; `helios.outbox.directory` can override the root directory. Each concurrent or pending session has its own limit, so total disk use can exceed one session's limit. There is no automatic deletion of unverified journals. Recovery skips files that another process has locked or already deleted without reporting a delivery failure.
 
-If the journal reaches its limit or a disk write fails, buffered entries are preserved and HTML logging continues. A local warning marks cloud logs as incomplete; the expected count still includes entries that could not be saved. Network requests never block individual log calls, but each call does perform a local disk write. Delivery warnings are local HTML diagnostics and are not themselves streamed.
+If the journal reaches its limit or a disk write fails, buffered entries are preserved and HTML logging continues. A local warning marks cloud logs as incomplete; the expected count still includes entries that could not be saved. Network requests never block individual log calls, but each call does perform a local disk write. Delivery warnings are local HTML diagnostics. They are not streamed and do not advance the stream ordinal or change its result.
 
 ## Bundled FFmpeg
 
 Screen-recording uses an FFmpeg 6.0 binary (~12-15 MB) bundled at `src/main/resources/ffmpeg/ffmpeg.exe` and extracted on first use to `%LOCALAPPDATA%\A360-BotFramework\ffmpeg\<hash>\ffmpeg.exe` on each Bot Runner. The build enables only the libx264 (Fast mode), libaom-av1 (Compact mode), and ffvhuff (rolling buffer) encoders, plus the segment + concat + mp4 muxers, so the binary stays small. Because libx264 is GPL, the bundled ffmpeg is distributed under GPL-2.0 or later; full notice and build configuration are at `src/main/resources/ffmpeg/LICENSE-FFMPEG.txt` and `tools/ffmpeg-build/Dockerfile`. Source code for FFmpeg is at https://ffmpeg.org/download.html.
+
+Concurrent processes share an extraction lock. Each extraction uses a unique temporary file and checks the SHA-256 before placing the binary in the cache.
+
+Completed rolling segments follow FFmpeg's segment-list order; the active segment is excluded. Recovery uses modification-time order only for old recorder folders without a segment list. Interrupted recovery can resume from its `.salvaging` folder at the next recorder startup. Existing cleanup rules still apply to corrupt or failed recordings.
 
 ### Disk usage with screen recording on
 

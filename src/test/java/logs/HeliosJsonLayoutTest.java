@@ -74,6 +74,25 @@ public class HeliosJsonLayoutTest {
     }
 
     @Test
+    public void matchingIdentityUsesTheSessionDefaultsAndMismatchesStayExplicit() {
+        String machine = CustomHTMLLayout.machineName();
+        String user = CustomHTMLLayout.userName();
+        JSONObject compact = new HeliosJsonLayout(machine, user).toJson(event(Level.INFO, row()), 0)
+                .getJSONArray("entries").getJSONObject(0);
+        Assert.assertEquals(compact.length(), 9);
+        Assert.assertFalse(compact.has("machine"));
+        Assert.assertFalse(compact.has("user"));
+        JSONObject override = new HeliosJsonLayout("different " + machine, user).toJson(event(Level.INFO, row()), 0)
+                .getJSONArray("entries").getJSONObject(0);
+        Assert.assertEquals(override.getString("machine"), machine);
+        Assert.assertFalse(override.has("user"), "each default is compared independently");
+        JSONObject both = new HeliosJsonLayout("different " + machine, "different " + user)
+                .toJson(event(Level.INFO, row()), 0).getJSONArray("entries").getJSONObject(0);
+        Assert.assertEquals(both.getString("machine"), machine);
+        Assert.assertEquals(both.getString("user"), user);
+    }
+
+    @Test
     public void screenPathFallsBackToTheScreenshotAndTaskMayBeEmpty() {
         Map<String, Object> row = row();
         row.put(CustomHTMLLayout.Columns.VIDEO, "");

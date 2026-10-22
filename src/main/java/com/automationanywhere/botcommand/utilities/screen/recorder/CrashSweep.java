@@ -33,8 +33,7 @@ import java.util.stream.Stream;
  * <ol>
  *   <li>Skip sessions with a live or unknown owner. Hold one sweep lock so another
  *       JVM cannot remove work that is being salvaged.</li>
- *   <li>If the folder name ends in {@code .salvaging} (leftover from a prior
- *       interrupted sweep), delete it only after those checks.</li>
+ *   <li>Retry any {@code .salvaging} folder left by an interrupted sweep.</li>
  *   <li>Otherwise atomically rename it to {@code <id>.salvaging} to claim it.
  *       If the rename fails, another JVM has it - skip.</li>
  *   <li>If {@code session.active} exists in the claimed folder, salvage in
@@ -50,7 +49,8 @@ import java.util.stream.Stream;
  *             clips.</li>
  *         <li>Append one summary line to {@code crash-log.txt}.</li>
  *       </ul></li>
- *   <li>Delete the claimed folder.</li>
+ *   <li>Delete the claimed folder after terminal recovery and durable media handling.
+ *       Preserve the sources if recovery is interrupted.</li>
  * </ol>
  *
  * <p>Runs on a daemon thread at {@link Thread#MIN_PRIORITY} so it yields to
@@ -123,38 +123,33 @@ final class CrashSweep {
         // Missing metadata is also protected: another bot may still be starting its recorder.
         if (ownerMayBeRunning(folder)) return;
         String name = folder.getFileName().toString();
-        if (name.endsWith(SALVAGING_SUFFIX)) {
-            if (hasManagedScratches(folder)) {
-                trySalvage(folder, appDataRoot, ffmpegExe);
-                if (hasManagedScratches(folder)) return;
+        Path claimed = folder;
+        String sessionId = name.endsWith(SALVAGING_SUFFIX)
+                ? name.substring(0, name.length() - SALVAGING_SUFFIX.length()) : name;
+        if (!name.endsWith(SALVAGING_SUFFIX)) {
+            claimed = folder.resolveSibling(name + SALVAGING_SUFFIX);
+            try {
+                Files.move(folder, claimed, StandardCopyOption.ATOMIC_MOVE);
+            } catch (NoSuchFileException e) {
+                return;
+            } catch (IOException e) {
+                LOGGER.debug("Could not claim {}: {}", folder, e.toString());
+                return;
             }
-            if (!removeCloudSources(folder)) return;
-            ScreenRecorder.deleteRecursivelyQuietly(folder);
-            if (!Files.exists(folder)) RecorderStorage.recovered(appDataRoot, name.substring(0, name.length() - SALVAGING_SUFFIX.length()));
-            return;
         }
-        Path claimed = folder.resolveSibling(name + SALVAGING_SUFFIX);
         try {
-            Files.move(folder, claimed, StandardCopyOption.ATOMIC_MOVE);
-        } catch (NoSuchFileException e) {
-            return;   // racing JVM already moved it
-        } catch (IOException e) {
-            LOGGER.debug("Could not claim {}: {}", folder, e.toString());
-            return;
-        }
-
-        try {
-            Path marker = claimed.resolve(SESSION_ACTIVE_MARKER);
-            if (Files.exists(marker)) {
+            if (Files.exists(claimed.resolve(SESSION_ACTIVE_MARKER)) || hasManagedScratches(claimed))
                 trySalvage(claimed, appDataRoot, ffmpegExe);
-            }
-        } finally {
-            if (!hasManagedScratches(claimed)) {
-                if (removeCloudSources(claimed)) {
-                    ScreenRecorder.deleteRecursivelyQuietly(claimed);
-                    if (!Files.exists(claimed)) RecorderStorage.recovered(appDataRoot, name);
-                }
-            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return;
+        } catch (IOException terminal) {
+            LOGGER.debug("Recovery failed for session {}: {}", sessionId, terminal.toString());
+        }
+        if (Thread.currentThread().isInterrupted() || hasManagedScratches(claimed)) return;
+        if (removeCloudSources(claimed)) {
+            ScreenRecorder.deleteRecursivelyQuietly(claimed);
+            if (!Files.exists(claimed)) RecorderStorage.recovered(appDataRoot, sessionId);
         }
     }
 
@@ -198,7 +193,8 @@ final class CrashSweep {
         }
     }
 
-    private static void trySalvage(Path claimedFolder, Path appDataRoot, Path ffmpegExe) {
+    private static void trySalvage(Path claimedFolder, Path appDataRoot, Path ffmpegExe)
+            throws IOException, InterruptedException {
         String folderName = claimedFolder.getFileName().toString();
         String sessionId = folderName.endsWith(SALVAGING_SUFFIX)
                 ? folderName.substring(0, folderName.length() - SALVAGING_SUFFIX.length())
@@ -209,8 +205,7 @@ final class CrashSweep {
         try {
             meta = SessionMeta.read(metaFile);
         } catch (Exception e) {
-            LOGGER.debug("Skipping salvage of {}: meta unreadable ({})", sessionId, e.toString());
-            return;
+            throw new IOException("Session metadata unreadable for " + sessionId, e);
         }
 
         EncodingMode mode = meta.encodingMode != null ? meta.encodingMode : EncodingMode.FAST;
@@ -228,7 +223,7 @@ final class CrashSweep {
         //    drain-timeout cases (ring content is "moment of close") but
         //    cheap and consistent.
         Path crashRecording = hasCloudOnlyRing(appDataRoot, sessionId)
-                ? null : trySalvageRing(claimedFolder, ffmpegExe, mode, logDir, sessionId, appDataRoot);
+                ? null : trySalvageRing(claimedFolder, ffmpegExe, mode, logDir, sessionId, appDataRoot, meta.bufferSeconds);
 
         if (!recoveredClips.isEmpty() || crashRecording != null) {
             Path summaryDir = crashRecording != null ? crashRecording.getParent()
@@ -278,81 +273,73 @@ final class CrashSweep {
      */
     private static List<Path> recoverPendingScratches(Path claimedFolder, Path ffmpegExe,
                                                       EncodingMode mode, Path logDir,
-                                                      String sessionId, Path appDataRoot) {
+                                                      String sessionId, Path appDataRoot)
+            throws IOException, InterruptedException {
         Path scratchRoot = claimedFolder.resolve(SCRATCH_DIR);
-        if (!Files.isDirectory(scratchRoot)) {
-            return List.of();
-        }
+        if (!Files.isDirectory(scratchRoot)) return List.of();
         if (logDir == null && !hasManagedScratches(claimedFolder)) {
             LOGGER.info("Session {} has pending scratches but original logDir is gone; "
                     + "nothing useful to recover (HTML log is also missing)", sessionId);
             return List.of();
         }
         Path clipsDir = logDir == null ? claimedFolder.resolve(CLIPS_DIR) : logDir.resolve(CLIPS_DIR);
-        try {
-            Files.createDirectories(clipsDir);
-        } catch (IOException e) {
-            LOGGER.warn("Could not create clips dir {} for session {}: {}",
-                    clipsDir, sessionId, e.toString());
+        try { Files.createDirectories(clipsDir); }
+        catch (IOException error) {
+            LOGGER.warn("Could not create clips dir {} for session {}: {}", clipsDir, sessionId, error.toString());
             return List.of();
         }
-
         List<Path> recovered = new ArrayList<>();
         try (Stream<Path> dirs = Files.list(scratchRoot)) {
-            dirs.filter(Files::isDirectory).forEach(scratchDir -> {
+            for (Path scratchDir : dirs.filter(Files::isDirectory).collect(java.util.stream.Collectors.toList())) {
+                if (Thread.currentThread().isInterrupted()) throw new InterruptedException("Recovery interrupted");
                 String errorUuid = scratchDir.getFileName().toString();
                 Path captureFile = scratchDir.resolve("capture.json");
                 if (Files.isRegularFile(captureFile)) {
                     recoverMediaScratch(scratchDir, captureFile, ffmpegExe, mode, recovered);
-                    return;
+                    continue;
                 }
                 Path target = clipsDir.resolve(errorUuid + ".mp4");
-                if (Files.exists(target)) {
-                    LOGGER.debug("Skipping already-recovered clip {} for session {}",
-                            target.getFileName(), sessionId);
-                    return;
+                if (!Files.exists(target)) {
+                    try {
+                        ClipFinalizer.encodeSegmentsToMp4(ffmpegExe, scratchDir, target, mode);
+                        recovered.add(target);
+                        LOGGER.info("Recovered pending clip for session {} -> {}", sessionId, target);
+                    } catch (IOException terminal) {
+                        LOGGER.debug("Could not recover scratch {}/{}: {}", sessionId, errorUuid, terminal.toString());
+                    }
                 }
-                try {
-                    ClipFinalizer.encodeSegmentsToMp4(ffmpegExe, scratchDir, target, mode);
-                    recovered.add(target);
-                    LOGGER.info("Recovered pending clip for session {} -> {}", sessionId, target);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    LOGGER.debug("Recovery interrupted for {}/{}", sessionId, errorUuid);
-                } catch (IOException e) {
-                    LOGGER.debug("Could not recover scratch {}/{} for session {}: {}",
-                            sessionId, errorUuid, mode, e.toString());
-                }
-            });
-        } catch (IOException e) {
-            LOGGER.debug("Could not list scratches under {}: {}", scratchRoot, e.toString());
+                // Success or a terminal encoder result makes this source safe to remove.
+                ScreenRecorder.deleteRecursivelyQuietly(scratchDir);
+            }
+        } catch (IOException error) {
+            LOGGER.debug("Could not list scratches under {}: {}", scratchRoot, error.toString());
         }
         return recovered;
     }
 
     private static void recoverMediaScratch(Path scratch, Path metadata, Path ffmpeg, EncodingMode mode,
-                                            List<Path> recovered) {
+                                            List<Path> recovered) throws InterruptedException {
         try {
             JSONObject capture = new JSONObject(Files.readString(metadata));
             Path target = Path.of(capture.getString("target"));
             // An existing target is not proof that the interrupted finalizer returned.
-            ClipFinalizer.encodeSegmentsToMp4(ffmpeg, scratch, target, mode,
-                    capture.optBoolean("cloudOnly") ? 8L * 1024 * 1024 : Long.MAX_VALUE);
+            try {
+                ClipFinalizer.encodeSegmentsToMp4(ffmpeg, scratch, target, mode,
+                        capture.optBoolean("cloudOnly") ? 8L * 1024 * 1024 : Long.MAX_VALUE);
+            } catch (IOException terminal) {
+                if (HeliosMediaOutbox.captureFinished(capture.getString("captureId"), null,
+                        terminal instanceof ClipFinalizer.TooLargeException ? "tooLarge" : "encodeFailed"))
+                    ScreenRecorder.deleteRecursivelyQuietly(scratch);
+                return;
+            }
             if (!HeliosMediaOutbox.captureFinished(capture.getString("captureId"), target, null)) return;
             recovered.add(target);
             if (!capture.optBoolean("localRequired") && capture.optBoolean("cloudOnly")) Files.deleteIfExists(target);
             ScreenRecorder.deleteRecursivelyQuietly(scratch);
-        } catch (InterruptedException interrupted) {
-            Thread.currentThread().interrupt();
-        } catch (IOException failure) {
-            try {
-                JSONObject capture = new JSONObject(Files.readString(metadata));
-                if (HeliosMediaOutbox.captureFinished(capture.getString("captureId"), null,
-                        failure instanceof ClipFinalizer.TooLargeException ? "tooLarge" : "encodeFailed"))
-                    ScreenRecorder.deleteRecursivelyQuietly(scratch);
-            } catch (IOException | RuntimeException retained) { }
+        } catch (IOException retained) {
+            LOGGER.debug("Could not finish managed recovery at {}: {}", scratch, retained.toString());
         } catch (RuntimeException damaged) {
-            // Keep unrecognized ownership metadata for inspection; never attach its ring to another row.
+            // Keep unrecognized ownership metadata; never attach its ring to another row.
         }
     }
 
@@ -363,7 +350,8 @@ final class CrashSweep {
      * fails.
      */
     private static Path trySalvageRing(Path claimedFolder, Path ffmpegExe, EncodingMode mode,
-                                       Path logDir, String sessionId, Path appDataRoot) {
+                                       Path logDir, String sessionId, Path appDataRoot, int bufferSeconds)
+            throws IOException, InterruptedException {
         Path ringDir = claimedFolder.resolve(RING_DIR);
         if (!Files.isDirectory(ringDir)) {
             LOGGER.debug("No ring/ in session {}; skipping ring salvage", sessionId);
@@ -372,14 +360,13 @@ final class CrashSweep {
         Path target = resolveRingTarget(logDir, sessionId, appDataRoot);
         try {
             Files.createDirectories(target.getParent());
-            ClipFinalizer.encodeSegmentsToMp4(ffmpegExe, ringDir, target, mode);
+            List<Path> segments = Files.exists(ringDir.resolve("list.txt"))
+                    ? ClipFinalizer.completedRingSegments(ringDir, bufferSeconds)
+                    : ClipFinalizer.listMovFilesByMtimeAsc(ringDir);
+            ClipFinalizer.encodeSegmentsToMp4(ffmpegExe, ringDir, target, mode, Long.MAX_VALUE, segments);
             LOGGER.info("Salvaged ring buffer for session {} -> {}", sessionId, target);
             return target;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            LOGGER.debug("Ring salvage interrupted for {}", sessionId);
-            return null;
-        } catch (Exception e) {
+        } catch (IOException e) {
             // Empty rings are normal when stage-1 produced nothing usable; log
             // at debug to avoid alarming users with a stack-y warning.
             LOGGER.debug("Ring salvage skipped for session {}: {}", sessionId, e.toString());

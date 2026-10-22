@@ -185,12 +185,10 @@ public class JSONReader {
             }
         } else if (jsonNode instanceof JSONArray) {
             JSONArray jsonArray = (JSONArray) jsonNode;
+            String arrayPrefix = isParentNodeObject ? prefix.substring(0, prefix.length() - 1) : prefix;
             for (int i = 0; i < jsonArray.length(); i++) {
                 Object arrayElement = jsonArray.get(i);
-                if (isParentNodeObject) {
-                    prefix = prefix.substring(0, prefix.length() - 1);
-                }
-                traverseJson(prefix + "[" + i + "].", arrayElement, jsonDictionary, false, isTrimValues);
+                traverseJson(arrayPrefix + "[" + i + "].", arrayElement, jsonDictionary, false, isTrimValues);
             }
         } else {
             String currentKey = prefix.substring(0, prefix.length() - 1);

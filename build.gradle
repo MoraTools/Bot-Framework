@@ -25,7 +25,7 @@ configure(allprojects){
 		groupName = 'com.automationanywhere'
 		testNgVersion = '7.12.0'
 		loggerVersion = '2.25.3'
-		version '4.5.2'
+		version '5.0.1'
 	}
 	group "$groupName"
 
@@ -37,6 +37,21 @@ configure(allprojects){
 
 	compileJava.options.encoding = 'UTF-8'
 	compileTestJava.options.encoding = 'UTF-8'
+
+	configurations { logViewerMinifier }
+	def compactLog = layout.buildDirectory.file('generated/log-viewer/log.html')
+	def minifyLogViewer = tasks.register('minifyLogViewer', JavaExec) {
+		javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(11) }
+		classpath = configurations.logViewerMinifier
+		mainClass = file('tools/MinifyLog.java').absolutePath
+		args file('src/main/resources/templates/log.html').absolutePath, compactLog.get().asFile.absolutePath
+		inputs.files('tools/MinifyLog.java', 'src/main/resources/templates/log.html')
+		outputs.file(compactLog)
+	}
+	sourceSets.main.resources.exclude('templates/log.html')
+	processResources {
+		from(minifyLogViewer) { into 'templates' }
+	}
 
 	repositories {
 		mavenCentral()
@@ -99,6 +114,9 @@ configure(allprojects){
 	}
 
 	dependencies {
+		logViewerMinifier 'com.google.javascript:closure-compiler:v20230802'
+		logViewerMinifier 'com.helger:ph-css:7.0.5'
+
 		annotationProcessor name: 'package-compileonly-sdk', version: '1.7.0'
 		compileOnly name: 'package-compileonly-sdk', version: '1.7.0'
 

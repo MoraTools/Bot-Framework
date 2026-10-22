@@ -6,7 +6,11 @@ import com.automationanywhere.botcommand.exception.BotCommandException;
 import org.testng.Assert;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 /**
  * @author Sumit Kumar
@@ -75,5 +79,49 @@ public class CSVReaderTest {
         Assert.assertNotNull(result, "The result should not be null.");
         Assert.assertEquals(result.get("Alice").toString(), "22", "The age of Alice should be 22, with spaces trimmed" +
                 ".");
+    }
+
+    @DataProvider
+    public Object[][] missingHeaders() {
+        return new Object[][]{
+                {"Key", "Age", "Key"},
+                {"Name", "Value", "Value"}
+        };
+    }
+
+    @Test(dataProvider = "missingHeaders")
+    public void testMissingHeaderFailsBeforeDataRows(String keyHeader, String valueHeader, String missingHeader)
+            throws Exception {
+        Path file = Files.createTempFile("csv-missing-header-", ".csv");
+        try {
+            for (String contents : new String[]{"Name,Age\n", "Name,Age\nAlice,22\n"}) {
+                Files.writeString(file, contents);
+                BotCommandException error = Assert.expectThrows(BotCommandException.class,
+                        () -> csvReader.action(file.toString(), COLUMN_HEADER, null, null,
+                                keyHeader, valueHeader, CHARSET_UTF_8, false, DELIMITER_COMMA));
+                Assert.assertTrue(error.getMessage().contains("Column '" + missingHeader + "'"));
+            }
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    @Test
+    public void testHeadersIgnoreCaseAndSkipIncompleteRows() throws Exception {
+        Path file = Files.createTempFile("csv-header-", ".csv");
+        try {
+            Files.writeString(file, "Name,Age\nAlice,22\nIncomplete\nBob, 30 \n");
+            DictionaryValue result = csvReader.action(file.toString(), COLUMN_HEADER, null, null,
+                    "name", "AGE", CHARSET_UTF_8, true, DELIMITER_COMMA);
+            Assert.assertEquals(result.get().size(), 2);
+            Assert.assertEquals(result.get("Alice").get(), "22");
+            Assert.assertEquals(result.get("Bob").get(), "30");
+
+            Files.writeString(file, "Name,Age\n");
+            Assert.assertTrue(csvReader.action(file.toString(), COLUMN_HEADER, null, null,
+                    "name", "AGE", CHARSET_UTF_8, false, DELIMITER_COMMA).get().isEmpty());
+        } finally {
+            Files.deleteIfExists(file);
+        }
     }
 }

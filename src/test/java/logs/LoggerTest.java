@@ -61,7 +61,6 @@ public class LoggerTest {
     private String absolutePathLog;
 
     private Map<String, Value> sourceMap;
-    private List<Value> entryList;
 
     @BeforeClass
     public void setUp() throws Exception {
@@ -105,30 +104,20 @@ public class LoggerTest {
     }
 
     private void setupTestData() {
-        // Create a source map with some variables representing variables sent via common variables
+        // Create the selected variable map.
         sourceMap = new HashMap<>();
         sourceMap.put("string", new StringValue("  Hello, World! with spaces at end and front  "));
         sourceMap.put("number", new NumberValue(100));
         sourceMap.put("boolean", new BooleanValue(true));
         sourceMap.put("date", new DateTimeValue(ZonedDateTime.now()));
 
-        // Create a list of dictionary values representing variables sent via entry list
-        entryList = new ArrayList<>();
-
         // String variable
-        Map<String, Value> variable1 = new HashMap<>();
-        variable1.put("NAME", new StringValue("entrylist string"));
-        variable1.put("VALUE", new StringValue("my string variable value from entry list"));
-        entryList.add(new DictionaryValue(variable1));
+        sourceMap.put("entrylist string", new StringValue("my string variable value from entry list"));
 
         // Number variable
-        Map<String, Value> variable2 = new HashMap<>();
-        variable2.put("NAME", new StringValue("entrylist number"));
-        variable2.put("VALUE", new NumberValue(456));
-        entryList.add(new DictionaryValue(variable2));
+        sourceMap.put("entrylist number", new NumberValue(456));
 
         // List variable with nested dictionary
-        Map<String, Value> variable3 = new HashMap<>();
         List<Value> listValue = new ArrayList<>();
         Map<String, Value> dictValue = new HashMap<>();
         dictValue.put("entrylist string in dictionary", new StringValue("dict string value"));
@@ -140,12 +129,9 @@ public class LoggerTest {
         listValue.add(new StringValue("Item 3"));
         listValue.add(new DictionaryValue(dictValue));
         lv.set(listValue);
-        variable3.put("NAME", new StringValue("entrylist list"));
-        variable3.put("VALUE", lv);
-        entryList.add(new DictionaryValue(variable3));
+        sourceMap.put("entrylist list", lv);
 
         // Table variable
-        Map<String, Value> variable4 = new HashMap<>();
         List<Schema> schemalist = new ArrayList<>();
         List<Row> rowList = new ArrayList<>();
         schemalist.add(new Schema("col1 "));
@@ -163,9 +149,7 @@ public class LoggerTest {
         TableValue tv = new TableValue();
         tv.set(new Table(schemalist, rowList));
 
-        variable4.put("NAME", new StringValue("entrylist table variable"));
-        variable4.put("VALUE", tv);
-        entryList.add(new DictionaryValue(variable4));
+        sourceMap.put("entrylist table variable", tv);
     }
 
     @AfterClass
@@ -213,9 +197,9 @@ public class LoggerTest {
         Assert.assertFalse(Files.exists(Paths.get(variablesDir)), "Variables stay inside the log");
 
         // Log messages of different levels
-        logMessage.action(logger, LEVEL_INFO, "Common logger: INFO message", true, LOG_VARIABLE, entryList, sourceMap);
-        logMessage.action(logger, LEVEL_WARN, "Common logger: WARN message", true, LOG_VARIABLE, entryList, sourceMap);
-        logMessage.action(logger, LEVEL_ERROR, "Common logger: ERROR message", true, LOG_VARIABLE, entryList,
+        logMessage.action(logger, LEVEL_INFO, "Common logger: INFO message", true, LOG_VARIABLE, sourceMap);
+        logMessage.action(logger, LEVEL_WARN, "Common logger: WARN message", true, LOG_VARIABLE, sourceMap);
+        logMessage.action(logger, LEVEL_ERROR, "Common logger: ERROR message", true, LOG_VARIABLE,
                 sourceMap);
 
         // Ensure log file is created
@@ -279,11 +263,11 @@ public class LoggerTest {
         Assert.assertFalse(Files.exists(Paths.get(infoVariablesDir)), "INFO variables stay inside the log");
 
         // Log messages of different levels
-        logMessage.action(logger, LEVEL_INFO, "Separate loggers: INFO message", true, LOG_VARIABLE, entryList,
+        logMessage.action(logger, LEVEL_INFO, "Separate loggers: INFO message", true, LOG_VARIABLE,
                 sourceMap);
-        logMessage.action(logger, LEVEL_WARN, "Separate loggers: WARN message", true, LOG_VARIABLE, entryList,
+        logMessage.action(logger, LEVEL_WARN, "Separate loggers: WARN message", true, LOG_VARIABLE,
                 sourceMap);
-        logMessage.action(logger, LEVEL_ERROR, "Separate loggers: ERROR message", true, LOG_VARIABLE, entryList,
+        logMessage.action(logger, LEVEL_ERROR, "Separate loggers: ERROR message", true, LOG_VARIABLE,
                 sourceMap);
 
         // Ensure all log files are created
@@ -345,12 +329,12 @@ public class LoggerTest {
         Assert.assertNotNull(logger2);
 
         // Log to the first logger instance
-        logMessage.action(logger1, LEVEL_INFO, "Logger 1: First message", true, LOG_VARIABLE, entryList, sourceMap);
-        logMessage.action(logger1, LEVEL_WARN, "Logger 1: Second message", true, LOG_VARIABLE, entryList, sourceMap);
+        logMessage.action(logger1, LEVEL_INFO, "Logger 1: First message", true, LOG_VARIABLE, sourceMap);
+        logMessage.action(logger1, LEVEL_WARN, "Logger 1: Second message", true, LOG_VARIABLE, sourceMap);
 
         // Log to the second logger instance
-        logMessage.action(logger2, LEVEL_INFO, "Logger 2: First message", true, LOG_VARIABLE, entryList, sourceMap);
-        logMessage.action(logger2, LEVEL_ERROR, "Logger 2: Second message", true, LOG_VARIABLE, entryList, sourceMap);
+        logMessage.action(logger2, LEVEL_INFO, "Logger 2: First message", true, LOG_VARIABLE, sourceMap);
+        logMessage.action(logger2, LEVEL_ERROR, "Logger 2: Second message", true, LOG_VARIABLE, sourceMap);
 
         // Wait a moment for file writing to complete
         Thread.sleep(500);
@@ -401,9 +385,9 @@ public class LoggerTest {
         int initialScreenshotCount = countFiles(screenshotDir);
 
         // Log without taking screenshots
-        logMessage.action(logger, LEVEL_INFO, "No screenshot: INFO message", false, LOG_VARIABLE, entryList, sourceMap);
-        logMessage.action(logger, LEVEL_WARN, "No screenshot: WARN message", false, LOG_VARIABLE, entryList, sourceMap);
-        logMessage.action(logger, LEVEL_ERROR, "No screenshot: ERROR message", false, LOG_VARIABLE, entryList,
+        logMessage.action(logger, LEVEL_INFO, "No screenshot: INFO message", false, LOG_VARIABLE, sourceMap);
+        logMessage.action(logger, LEVEL_WARN, "No screenshot: WARN message", false, LOG_VARIABLE, sourceMap);
+        logMessage.action(logger, LEVEL_ERROR, "No screenshot: ERROR message", false, LOG_VARIABLE,
                 sourceMap);
 
         // Wait a moment for file writing to complete
@@ -427,9 +411,14 @@ public class LoggerTest {
     public void testLogVariableHandling() throws Exception {
         String path = baseTestPath + "variable-flag.html";
         CustomLogger logger = new CustomLogger("variable-flag", path, 10);
+        Map<String, Value> selected = new HashMap<>(sourceMap);
+        selected.put("nestedSelection", new DictionaryValue(VariableCardParityTest.snapshotValues()));
+        selected.put("falseBoolean", new BooleanValue(false));
         try {
-            logMessage.action(logger, LEVEL_INFO, "With variables", false, LOG_VARIABLE, entryList, sourceMap);
-            logMessage.action(logger, LEVEL_INFO, "Without variables", false, DO_NOT_LOG_VARIABLE, entryList, sourceMap);
+            Assert.assertEquals(logMessage.action(logger, LEVEL_INFO, "With variables", false, LOG_VARIABLE, selected).get(), "");
+            logMessage.action(logger, LEVEL_INFO, "Without variables", false, DO_NOT_LOG_VARIABLE, selected);
+            logMessage.action(logger, LEVEL_INFO, "Null selection", false, LOG_VARIABLE, null);
+            logMessage.action(logger, LEVEL_INFO, "Empty selection", false, LOG_VARIABLE, Map.of());
         } finally {
             logger.close();
         }
@@ -438,6 +427,19 @@ public class LoggerTest {
         Assert.assertTrue(content.contains("Without variables"));
         Assert.assertEquals(content.split("<details class='entry-variables'>", -1).length - 1, 1);
         Assert.assertTrue(content.contains("my string variable value from entry list"));
+        Assert.assertTrue(content.contains("Null selection"));
+        Assert.assertTrue(content.contains("Empty selection"));
+        Assert.assertTrue(content.contains("<div class='variable-type'>BOOLEAN</div><div class='variable-value'>true</div>"));
+        Assert.assertTrue(content.contains("<div class='variable-type'>BOOLEAN</div><div class='variable-value'>false</div>"));
+        Assert.assertTrue(content.contains("<div class='variable-type'>DICTIONARY</div>"));
+        Assert.assertTrue(content.contains("<div class='variable-type'>LIST</div>"));
+        Assert.assertTrue(content.contains("<div class='variable-type'>RECORD</div>"));
+        Assert.assertTrue(content.contains("<div class='variable-type'>TABLE</div>"));
+        Assert.assertTrue(content.contains("Record: 2 columns"));
+        Assert.assertTrue(content.contains("Table: 2 rows x 2 columns"));
+        Assert.assertTrue(content.contains("key&lt;&amp;&gt;"));
+        Assert.assertTrue(content.contains("list&lt;&amp;&gt;"));
+        Assert.assertTrue(content.contains("dictionary<span class='ws-marker ws-tab'"));
         Assert.assertFalse(Files.exists(Paths.get(baseTestPath, "variables")));
     }
 
@@ -448,7 +450,7 @@ public class LoggerTest {
         try {
             for (int i = 0; i < 3; i++) {
                 logMessage.action(logger, LEVEL_INFO, "Log with complex variables", false,
-                        LOG_VARIABLE, entryList, sourceMap);
+                        LOG_VARIABLE, sourceMap);
             }
         } finally {
             logger.close();
@@ -481,8 +483,8 @@ public class LoggerTest {
         Assert.assertNotNull(logger, "Logger should be initialized properly");
 
         // Log messages with screenshots and variables
-        logMessage.action(logger, LEVEL_INFO, "Nested folder INFO message", true, LOG_VARIABLE, entryList, sourceMap);
-        logMessage.action(logger, LEVEL_ERROR, "Nested folder ERROR message", true, LOG_VARIABLE, entryList, sourceMap);
+        logMessage.action(logger, LEVEL_INFO, "Nested folder INFO message", true, LOG_VARIABLE, sourceMap);
+        logMessage.action(logger, LEVEL_ERROR, "Nested folder ERROR message", true, LOG_VARIABLE, sourceMap);
 
         // Wait for file operations to complete
         Thread.sleep(500);
@@ -536,8 +538,8 @@ public class LoggerTest {
         Assert.assertNotNull(logger, "Logger should be initialized properly");
 
         // Log messages with screenshots and variables
-        logMessage.action(logger, LEVEL_INFO, "Different drive INFO message", true, LOG_VARIABLE, entryList, sourceMap);
-        logMessage.action(logger, LEVEL_WARN, "Different drive WARN message", true, DO_NOT_LOG_VARIABLE, null, null);
+        logMessage.action(logger, LEVEL_INFO, "Different drive INFO message", true, LOG_VARIABLE, sourceMap);
+        logMessage.action(logger, LEVEL_WARN, "Different drive WARN message", true, DO_NOT_LOG_VARIABLE, null);
 
         // Wait for file operations to complete
         Thread.sleep(500);
@@ -591,7 +593,7 @@ public class LoggerTest {
         Assert.assertNotNull(logger, "Logger should be initialized properly");
 
         // Log messages with screenshots and variables
-        logMessage.action(logger, LEVEL_INFO, "Absolute path INFO message", true, LOG_VARIABLE, entryList, sourceMap);
+        logMessage.action(logger, LEVEL_INFO, "Absolute path INFO message", true, LOG_VARIABLE, sourceMap);
 
         // Wait for file operations to complete
         Thread.sleep(500);
@@ -650,7 +652,7 @@ public class LoggerTest {
         Assert.assertNotNull(logger, "Logger should be initialized properly");
 
         // Log a message with screenshot and variables
-        logMessage.action(logger, LEVEL_INFO, "Original location message", true, LOG_VARIABLE, entryList, sourceMap);
+        logMessage.action(logger, LEVEL_INFO, "Original location message", true, LOG_VARIABLE, sourceMap);
 
         // Wait for file operations to complete
         Thread.sleep(500);

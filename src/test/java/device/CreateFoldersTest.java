@@ -1,16 +1,22 @@
 package device;
 
 import com.automationanywhere.botcommand.actions.device.CreateFolders;
+import com.automationanywhere.botcommand.actions.device.CreateFoldersCommand;
 import com.automationanywhere.botcommand.data.Value;
+import com.automationanywhere.botcommand.data.impl.BooleanValue;
 import com.automationanywhere.botcommand.data.impl.DictionaryValue;
+import com.automationanywhere.botcommand.data.impl.ListValue;
 import com.automationanywhere.botcommand.data.impl.StringValue;
+import com.automationanywhere.botcommand.exception.BotCommandException;
 import org.apache.commons.io.FileUtils;
 import org.testng.Assert;
+import org.testng.SkipException;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
-import java.io.File;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
@@ -24,28 +30,24 @@ import java.util.Map;
 public class CreateFoldersTest {
     private static final String RELATIVE_PATH_TYPE = "RELATIVE";
     private static final String ABSOLUTE_PATH_TYPE = "ABSOLUTE";
-    private static final String TEST_BASE_PATH = "src/test/target/temp/createFolderTest/";
-
     private CreateFolders createFolders;
+    private Path testBasePath;
 
     @BeforeMethod
     public void setUp() throws Exception {
         createFolders = new CreateFolders();
-        // Ensuring the test base path is clean before each test
-        FileUtils.forceMkdir(new File(TEST_BASE_PATH));
-        FileUtils.cleanDirectory(new File(TEST_BASE_PATH));
+        testBasePath = Files.createTempDirectory("create-folder-test-");
     }
 
     @AfterMethod
     public void tearDown() throws Exception {
-        // Clean up test artifacts after each test
-        FileUtils.cleanDirectory(new File(TEST_BASE_PATH));
+        FileUtils.deleteDirectory(testBasePath.toFile());
     }
 
     @Test
     public void testCreateFoldersRelativePath() {
         String pathType = RELATIVE_PATH_TYPE;
-        String baseFolderPath = TEST_BASE_PATH + "/base";
+        String baseFolderPath = testBasePath.resolve("base").toString();
         List<Value> folderPaths = List.of(
                 new StringValue("folder1"),
                 new StringValue("folder2/subfolder"),
@@ -77,9 +79,9 @@ public class CreateFoldersTest {
         String pathType = ABSOLUTE_PATH_TYPE;
         String baseFolderPath = ""; // Not used in ABSOLUTE path mode
         List<Value> folderPaths = List.of(
-                new StringValue(TEST_BASE_PATH + "/base/folder1"),
-                new StringValue(TEST_BASE_PATH + "/base/folder2/subfolder"),
-                new StringValue(TEST_BASE_PATH + "/base/folder3/subfolder1/subfolder2/subfolder3")
+                new StringValue(testBasePath.resolve("base/folder1").toString()),
+                new StringValue(testBasePath.resolve("base/folder2/subfolder").toString()),
+                new StringValue(testBasePath.resolve("base/folder3/subfolder1/subfolder2/subfolder3").toString())
         );
         Boolean overwriteExisting = true;
         Boolean appendToExistingDictionary = false;
@@ -91,5 +93,125 @@ public class CreateFoldersTest {
                 appendToExistingDictionary, configDictionary, suffix, prefix);
 
         assertFolderCreation(output, prefix, suffix);
+    }
+
+    @DataProvider
+    public Object[][] invalidRelativePaths() {
+        return new Object[][]{
+                {""}, {" "}, {"."}, {"child/.."}, {".."}, {"../outside"}, {"child/../.."}
+        };
+    }
+
+    @Test(dataProvider = "invalidRelativePaths")
+    public void testInvalidBatchPreservesExistingFolders(String invalidPath) throws Exception {
+        Path base = Files.createDirectories(testBasePath.resolve("base"));
+        Path existing = Files.createDirectories(base.resolve("existing"));
+        Path marker = Files.writeString(existing.resolve("marker.txt"), "keep");
+        Path baseMarker = Files.writeString(base.resolve("base-marker.txt"), "keep");
+
+        Assert.expectThrows(BotCommandException.class, () -> createFolders.action(RELATIVE_PATH_TYPE,
+                base.toString(), List.of(new StringValue("existing"), new StringValue(invalidPath)),
+                true, false, null, null, null));
+
+        Assert.assertEquals(Files.readString(marker), "keep");
+        Assert.assertEquals(Files.readString(baseMarker), "keep");
+    }
+
+    @Test
+    public void testBlankItemThroughSdkWrapperPreservesBaseFolder() throws Exception {
+        Path base = Files.createDirectories(testBasePath.resolve("base"));
+        Path marker = Files.writeString(base.resolve("marker.txt"), "keep");
+        Map<String, Value> parameters = new HashMap<>();
+        parameters.put("pathType", new StringValue(RELATIVE_PATH_TYPE));
+        parameters.put("baseFolderPath", new StringValue(base.toString()));
+        parameters.put("folderPaths", new ListValue(new StringValue("")));
+        parameters.put("overwriteExisting", new BooleanValue(true));
+        parameters.put("appendToExistingDictionary", new BooleanValue(false));
+
+        Assert.expectThrows(BotCommandException.class,
+                () -> new CreateFoldersCommand().execute(null, parameters, new HashMap<>()));
+        Assert.assertEquals(Files.readString(marker), "keep");
+    }
+
+    @Test
+    public void testRootAndFileParentRejectedBeforeOverwrite() throws Exception {
+        Path existing = Files.createDirectories(testBasePath.resolve("existing"));
+        Path marker = Files.writeString(existing.resolve("marker.txt"), "keep");
+        Path fileParent = Files.writeString(testBasePath.resolve("file.txt"), "keep");
+        for (Path invalidPath : List.of(testBasePath.getRoot(), fileParent.resolve("child"))) {
+            Assert.expectThrows(BotCommandException.class, () -> createFolders.action(ABSOLUTE_PATH_TYPE,
+                    null, List.of(new StringValue(existing.toString()), new StringValue(invalidPath.toString())),
+                    true, false, null, null, null));
+            Assert.assertEquals(Files.readString(marker), "keep");
+            Assert.assertEquals(Files.readString(fileParent), "keep");
+        }
+    }
+
+    @Test
+    public void testSymlinkTargetsStayInsideBaseFolder() throws Exception {
+        Path base = Files.createDirectories(testBasePath.resolve("base"));
+        Path existing = Files.createDirectories(base.resolve("existing"));
+        Path marker = Files.writeString(existing.resolve("marker.txt"), "keep");
+        Path outside = Files.createDirectories(testBasePath.resolve("outside"));
+        Path outsideMarker = Files.writeString(outside.resolve("marker.txt"), "keep");
+        try {
+            Files.createSymbolicLink(base.resolve("link"), outside);
+            Files.createSymbolicLink(base.resolve("base-link"), base);
+        } catch (IOException | UnsupportedOperationException | SecurityException e) {
+            throw new SkipException("Symbolic links are unavailable", e);
+        }
+        for (String invalidPath : List.of("link/child", "link/../outside", "base-link")) {
+            Assert.expectThrows(BotCommandException.class, () -> createFolders.action(RELATIVE_PATH_TYPE,
+                    base.toString(), List.of(new StringValue("existing"), new StringValue(invalidPath)),
+                    true, false, null, null, null));
+            Assert.assertEquals(Files.readString(marker), "keep");
+            Assert.assertEquals(Files.readString(outsideMarker), "keep");
+        }
+    }
+
+    @Test
+    public void testValidBaseAndParentSymlinksAndDotSegments() throws Exception {
+        Path base = Files.createDirectories(testBasePath.resolve("base"));
+        Files.createDirectories(base.resolve("inside"));
+        Path baseLink = testBasePath.resolve("base-link");
+        try {
+            Files.createSymbolicLink(baseLink, base);
+            Files.createSymbolicLink(base.resolve("inside-link"), base.resolve("inside"));
+        } catch (IOException | UnsupportedOperationException | SecurityException e) {
+            throw new SkipException("Symbolic links are unavailable", e);
+        }
+
+        DictionaryValue result = createFolders.action(RELATIVE_PATH_TYPE, baseLink.toString(),
+                List.of(new StringValue("inside-link/child"), new StringValue("inside/../sibling")),
+                false, false, null, null, null);
+
+        Assert.assertTrue(Files.isDirectory(base.resolve("inside/child")));
+        Assert.assertTrue(Files.isDirectory(base.resolve("sibling")));
+        Assert.assertEquals(result.get("child").get(), baseLink.resolve("inside-link/child").toString());
+        Assert.assertEquals(result.get("sibling").get(), baseLink.resolve("inside/../sibling").toString());
+    }
+
+    @Test
+    public void testValidOverwriteKeepsBaseAndAppendsDictionary() throws Exception {
+        Path base = Files.createDirectories(testBasePath.resolve("base"));
+        Path existing = Files.createDirectories(base.resolve("existing"));
+        Path oldFile = Files.writeString(existing.resolve("old.txt"), "replace");
+        Path baseMarker = Files.writeString(base.resolve("marker.txt"), "keep");
+        Map<String, Value> config = new HashMap<>();
+        config.put("original", new StringValue("keep"));
+
+        DictionaryValue result = createFolders.action(RELATIVE_PATH_TYPE, base.toString(),
+                List.of(new StringValue("existing"), new StringValue("new/child")),
+                true, true, config, "_Path", "test_");
+
+        Assert.assertFalse(Files.exists(oldFile));
+        Assert.assertEquals(Files.readString(baseMarker), "keep");
+        Assert.assertTrue(Files.isDirectory(existing));
+        Assert.assertTrue(Files.isDirectory(base.resolve("new/child")));
+        Assert.assertEquals(result.get("test_existing_Path").get(), existing.toString());
+        Assert.assertEquals(result.get("test_child_Path").get(), base.resolve("new/child").toString());
+        Assert.assertEquals(config.get("original").get(), "keep");
+        Assert.assertEquals(config.get("test_existing_Path").get(), existing.toString());
+        Assert.assertEquals(config.get("test_child_Path").get(), base.resolve("new/child").toString());
     }
 }

@@ -275,17 +275,13 @@ public class RenderingShowcaseTest {
         ));
         sourceMap.put("Table With Nested Cells", nestedCellsTable);
 
-        // Build entryList (LogMessage variant) with one richly nested entry
-        List<Value> entryList = new ArrayList<>();
-        Map<String, Value> richEntry = new LinkedHashMap<>();
-        richEntry.put("NAME", new StringValue("Pipeline Configuration"));
+        // Add one richly nested variable to the selection.
         Map<String, Value> richDict = new LinkedHashMap<>();
         richDict.put("source", new StringValue("s3://bucket/raw-data/2026/"));
         richDict.put("destination", new StringValue("s3://bucket/processed/2026/"));
         richDict.put("steps", flatStringList);
         richDict.put("retry_policy", new DictionaryValue(configDict));
-        richEntry.put("VALUE", new DictionaryValue(richDict));
-        entryList.add(new DictionaryValue(richEntry));
+        sourceMap.put("Pipeline Configuration", new DictionaryValue(richDict));
 
         logMessage.action(
             customLogger,
@@ -293,7 +289,6 @@ public class RenderingShowcaseTest {
             "Exhaustive variables showcase entry",
             false,
             LOG_VARIABLE,
-            entryList,
             sourceMap
         );
 
@@ -307,7 +302,7 @@ public class RenderingShowcaseTest {
         Assert.assertTrue(variablesHtml.contains("Wide Table"), "should include 'Wide Table' name");
         Assert.assertTrue(variablesHtml.contains("Tall Table (30 rows)"), "should include 'Tall Table' name");
         Assert.assertTrue(variablesHtml.contains("Multi-Line Cells Table"), "should include multi-line cells table name");
-        Assert.assertTrue(variablesHtml.contains("Pipeline Configuration"), "should include entryList variable name");
+        Assert.assertTrue(variablesHtml.contains("Pipeline Configuration"), "should include selected variable name");
         Assert.assertTrue(variablesHtml.contains("&lt;script&gt;"), "HTML special characters must be escaped");
         Assert.assertTrue(variablesHtml.contains("日本語"), "Unicode characters should pass through");
         Assert.assertTrue(variablesHtml.contains("AAAAAAAAAAAAAAAAAAAAAAAAA"), "Unbreakable token should survive verbatim");
@@ -331,37 +326,37 @@ public class RenderingShowcaseTest {
         // 1. Short INFO, no extras
         logMessage.action(customLogger, LEVEL_INFO,
             "Bot started",
-            false, DO_NOT_LOG_VARIABLE, null, null);
+            false, DO_NOT_LOG_VARIABLE, null);
 
         // 2. INFO with screenshot
         logMessage.action(customLogger, LEVEL_INFO,
             "Initial screen captured for run-time baseline",
-            true, DO_NOT_LOG_VARIABLE, null, null);
+            true, DO_NOT_LOG_VARIABLE, null);
 
         // 3. Long single-line INFO
         logMessage.action(customLogger, LEVEL_INFO,
             "Processed records sequentially: starting from the first record in the input file, applying validation, then mapping each field through the transformation pipeline, and finally writing each result to the output destination, as one continuous operation across all rows in the source.",
-            false, DO_NOT_LOG_VARIABLE, null, null);
+            false, DO_NOT_LOG_VARIABLE, null);
 
         // 4. Multi-line INFO message (newlines preserved on render? Depends on layout's escaping; this test produces the raw entry)
         logMessage.action(customLogger, LEVEL_INFO,
             "Step 1: Read input\nStep 2: Validate fields\nStep 3: Transform values\nStep 4: Write output",
-            false, DO_NOT_LOG_VARIABLE, null, null);
+            false, DO_NOT_LOG_VARIABLE, null);
 
         // 5. INFO with HTML special chars
         logMessage.action(customLogger, LEVEL_INFO,
             "Source file <input.csv> & destination <output.json> set; \"verbose\" mode = 'true'",
-            false, DO_NOT_LOG_VARIABLE, null, null);
+            false, DO_NOT_LOG_VARIABLE, null);
 
         // 6. INFO with unicode + emoji
         logMessage.action(customLogger, LEVEL_INFO,
             "Run completed: 日本語 OK, العربية OK, 🎉 success",
-            false, DO_NOT_LOG_VARIABLE, null, null);
+            false, DO_NOT_LOG_VARIABLE, null);
 
         // 7. INFO with very long unbroken token
         logMessage.action(customLogger, LEVEL_INFO,
             "Trace: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-token-end",
-            false, DO_NOT_LOG_VARIABLE, null, null);
+            false, DO_NOT_LOG_VARIABLE, null);
 
         // 8. INFO with variables
         Map<String, Value> infoVars = new LinkedHashMap<>();
@@ -370,7 +365,7 @@ public class RenderingShowcaseTest {
         infoVars.put("inputFile", new StringValue("data/customers-2026-Q1.csv"));
         logMessage.action(customLogger, LEVEL_INFO,
             "Processing batch",
-            false, LOG_VARIABLE, null, infoVars);
+            false, LOG_VARIABLE, infoVars);
 
         // 9. INFO with screenshot AND variables
         Map<String, Value> screenVars = new LinkedHashMap<>();
@@ -378,17 +373,17 @@ public class RenderingShowcaseTest {
         screenVars.put("loggedInUser", new StringValue("automation@example.com"));
         logMessage.action(customLogger, LEVEL_INFO,
             "Captured dashboard state",
-            true, LOG_VARIABLE, null, screenVars);
+            true, LOG_VARIABLE, screenVars);
 
         // 10. WARN, short
         logMessage.action(customLogger, LEVEL_WARN,
             "Optional field missing in record 42; using default value",
-            false, DO_NOT_LOG_VARIABLE, null, null);
+            false, DO_NOT_LOG_VARIABLE, null);
 
         // 11. WARN with screenshot
         logMessage.action(customLogger, LEVEL_WARN,
             "UI element not found at expected location; capturing state for diagnosis",
-            true, DO_NOT_LOG_VARIABLE, null, null);
+            true, DO_NOT_LOG_VARIABLE, null);
 
         // 12. WARN with multi-line message + variables
         Map<String, Value> warnVars = new LinkedHashMap<>();
@@ -399,17 +394,17 @@ public class RenderingShowcaseTest {
             "  - phoneNumber: 12 records\n" +
             "  - secondaryEmail: 5 records\n" +
             "Defaults will be applied where applicable.",
-            false, LOG_VARIABLE, null, warnVars);
+            false, LOG_VARIABLE, warnVars);
 
         // 13. ERROR, short
         logMessage.action(customLogger, LEVEL_ERROR,
             "Connection refused: unable to reach upstream service",
-            false, DO_NOT_LOG_VARIABLE, null, null);
+            false, DO_NOT_LOG_VARIABLE, null);
 
         // 14. ERROR with screenshot
         logMessage.action(customLogger, LEVEL_ERROR,
             "Authentication failed at login screen",
-            true, DO_NOT_LOG_VARIABLE, null, null);
+            true, DO_NOT_LOG_VARIABLE, null);
 
         // 15. ERROR with stack-trace-like multi-line message + variables + screenshot
         Map<String, Value> errorVars = new LinkedHashMap<>();
@@ -425,14 +420,14 @@ public class RenderingShowcaseTest {
             "    at java.net.AbstractPlainSocketImpl.connectToAddress(AbstractPlainSocketImpl.java:206)\n" +
             "    at java.net.Socket.connect(Socket.java:606)\n" +
             "    at sun.security.ssl.SSLSocketImpl.connect(SSLSocketImpl.java:288)",
-            true, LOG_VARIABLE, null, errorVars);
+            true, LOG_VARIABLE, errorVars);
 
         // 16-25. Filler entries to make the log long enough to exercise scrolling and the sticky log-table thead
         for (int i = 1; i <= 10; i++) {
             String level = (i % 5 == 0) ? LEVEL_ERROR : (i % 3 == 0) ? LEVEL_WARN : LEVEL_INFO;
             logMessage.action(customLogger, level,
                 "Pipeline iteration " + i + " of 10 completed successfully with all expected validations passing",
-                false, DO_NOT_LOG_VARIABLE, null, null);
+                false, DO_NOT_LOG_VARIABLE, null);
         }
 
         // 26. Final INFO summary with rich variables
@@ -445,7 +440,7 @@ public class RenderingShowcaseTest {
         summaryVars.put("endTime", new DateTimeValue(ZonedDateTime.now()));
         logMessage.action(customLogger, LEVEL_INFO,
             "Run summary",
-            false, LOG_VARIABLE, null, summaryVars);
+            false, LOG_VARIABLE, summaryVars);
 
         new StopLoggerSession().stop(customLogger);
 
@@ -570,12 +565,8 @@ public class RenderingShowcaseTest {
         TableValue tableValue = new TableValue();
         tableValue.set(new Table(schemas, rows));
 
-        Map<String, Value> tableVariable = new java.util.HashMap<>();
-        tableVariable.put("NAME", new StringValue("Employee Roster"));
-        tableVariable.put("VALUE", tableValue);
-
-        List<Value> wideEntryList = new ArrayList<>();
-        wideEntryList.add(new DictionaryValue(tableVariable));
+        Map<String, Value> tableVariable = new LinkedHashMap<>();
+        tableVariable.put("Employee Roster", tableValue);
 
         logMessage.action(
             customLogger,
@@ -583,8 +574,7 @@ public class RenderingShowcaseTest {
             "Wide table variable rendering test",
             false,
             LOG_VARIABLE,
-            wideEntryList,
-            null
+            tableVariable
         );
 
         new StopLoggerSession().stop(customLogger);
@@ -613,7 +603,7 @@ public class RenderingShowcaseTest {
 
     @Test
     public void testWhitespaceMarkersKeepEscapingAndLineEndings() {
-        String trail = "<span class='ws-marker ws-trail' aria-hidden='true'>··</span>";
+        String trail = "<span class='ws-trail'><span class='ws-marker' aria-hidden='true'>··</span>  </span>";
         String newline = "<span class='ws-marker ws-nl' aria-hidden='true'>↵</span>\n";
         String tab = "<span class='ws-marker ws-tab' aria-hidden='true'>→</span>\t";
         Assert.assertEquals(HTMLGenerator.escapeWithWhitespaceMarkers(null), "");
@@ -629,8 +619,8 @@ public class RenderingShowcaseTest {
         String spaces = " ".repeat(65536);
         String interior = "left" + spaces + "right";
         Assert.assertEquals(HTMLGenerator.escapeWithWhitespaceMarkers(interior), interior);
-        String marked = "left<span class='ws-marker ws-trail' aria-hidden='true'>"
-                + "·".repeat(spaces.length()) + "</span>";
+        String marked = "left<span class='ws-trail'><span class='ws-marker' aria-hidden='true'>"
+                + "·".repeat(spaces.length()) + "</span>" + spaces + "</span>";
         Assert.assertEquals(HTMLGenerator.escapeWithWhitespaceMarkers("left" + spaces), marked);
         Assert.assertEquals(HTMLGenerator.escapeWithWhitespaceMarkers("left" + spaces + "\r\nright"),
                 marked + "\r<span class='ws-marker ws-nl' aria-hidden='true'>↵</span>\nright");
@@ -652,13 +642,13 @@ public class RenderingShowcaseTest {
 
         logMessage.action(customLogger, LEVEL_INFO,
             "Step 1: Read input\nStep 2: Validate\nStep 3: Done",
-            false, DO_NOT_LOG_VARIABLE, null, null);
+            false, DO_NOT_LOG_VARIABLE, null);
 
         new StopLoggerSession().stop(customLogger);
 
         String logHtml = CompressedSnapshots.expand(new String(Files.readAllBytes(Paths.get(logFilePath))));
-        Assert.assertTrue(logHtml.contains("class='message-cell'"),
-            "Message cell should carry the message-cell class so pre-wrap can target it");
+        Assert.assertTrue(logHtml.replaceAll("\\s+", "").contains(".log-entry>td:nth-child(4){white-space:pre-wrap;"),
+            "The fourth column preserves message whitespace without a per-row class");
         Assert.assertTrue(logHtml.contains("class='ws-marker ws-nl'"),
             "Multi-line message should emit newline whitespace markers");
         Assert.assertTrue(logHtml.contains("↵"),
@@ -681,7 +671,7 @@ public class RenderingShowcaseTest {
         Map<String, Value> vars = new java.util.LinkedHashMap<>();
         vars.put("indented", new StringValue("col1\tcol2\tcol3"));
         logMessage.action(customLogger, LEVEL_INFO, "Tab in variable",
-            false, LOG_VARIABLE, null, vars);
+            false, LOG_VARIABLE, vars);
 
         new StopLoggerSession().stop(customLogger);
 
@@ -710,13 +700,13 @@ public class RenderingShowcaseTest {
         Map<String, Value> vars = new java.util.LinkedHashMap<>();
         vars.put("padded", new StringValue("value with trailing   "));
         logMessage.action(customLogger, LEVEL_INFO, "Trailing space",
-            false, LOG_VARIABLE, null, vars);
+            false, LOG_VARIABLE, vars);
 
         new StopLoggerSession().stop(customLogger);
 
         Assert.assertFalse(Files.exists(Paths.get(testPath, "variables")), "no variable sidecar files");
         String variablesHtml = CompressedSnapshots.expand(Files.readString(Paths.get(logFilePath)));
-        Assert.assertTrue(variablesHtml.contains("class='ws-marker ws-trail'"),
+        Assert.assertTrue(variablesHtml.contains("class='ws-trail'"),
             "Trailing spaces should emit ws-trail marker spans");
         Assert.assertTrue(variablesHtml.contains("···"),
             "Three trailing spaces should render as three middle-dot glyphs");
@@ -744,17 +734,17 @@ public class RenderingShowcaseTest {
         Map<String, Value> vars = new java.util.LinkedHashMap<>();
         vars.put("smallTable", table);
         logMessage.action(customLogger, LEVEL_INFO, "Sticky summary check",
-            false, LOG_VARIABLE, null, vars);
+            false, LOG_VARIABLE, vars);
 
         new StopLoggerSession().stop(customLogger);
 
         Assert.assertFalse(Files.exists(Paths.get(testPath, "variables")), "no variable sidecar files");
         String variablesHtml = CompressedSnapshots.expand(Files.readString(Paths.get(logFilePath)));
-        Assert.assertTrue(variablesHtml.contains("details.full-width > summary"),
+        Assert.assertTrue(variablesHtml.replaceAll("\\s+", "").contains("details.full-width>summary"),
             "Sticky summary CSS rule should be present in the variables template");
-        Assert.assertTrue(variablesHtml.contains("position: sticky"),
+        Assert.assertTrue(variablesHtml.replaceAll("\\s+", "").contains("position:sticky"),
             "Sticky positioning should be declared in the variables template");
-        Assert.assertTrue(variablesHtml.contains("overflow: auto"),
+        Assert.assertTrue(variablesHtml.replaceAll("\\s+", "").contains("overflow:auto"),
             "Wide tables have a local scroll area");
         Assert.assertTrue(variablesHtml.contains("<details class='full-width'>"),
             "Tables should be wrapped in details.full-width to receive sticky behavior");
@@ -801,7 +791,7 @@ public class RenderingShowcaseTest {
         Map<String, Value> vars = new LinkedHashMap<>();
         vars.put("deepNested", new DictionaryValue(topDict));
         logMessage.action(customLogger, LEVEL_INFO, "Deep nesting test",
-            false, LOG_VARIABLE, null, vars);
+            false, LOG_VARIABLE, vars);
 
         new StopLoggerSession().stop(customLogger);
 
@@ -850,7 +840,7 @@ public class RenderingShowcaseTest {
         vars.put("emptyDict", emptyDict);
         vars.put("emptyTable", emptyTable);
         logMessage.action(customLogger, LEVEL_INFO, "Empty containers test",
-            false, LOG_VARIABLE, null, vars);
+            false, LOG_VARIABLE, vars);
 
         new StopLoggerSession().stop(customLogger);
 
@@ -889,7 +879,7 @@ public class RenderingShowcaseTest {
         vars.put("dictWithWeirdKey", new DictionaryValue(innerDict));
 
         logMessage.action(customLogger, LEVEL_INFO, "HTML special chars in names",
-            false, LOG_VARIABLE, null, vars);
+            false, LOG_VARIABLE, vars);
 
         new StopLoggerSession().stop(customLogger);
 
@@ -944,7 +934,7 @@ public class RenderingShowcaseTest {
         vars.put("singleColumn", singleCol);
         vars.put("withAllNullRow", nullRowTable);
         logMessage.action(customLogger, LEVEL_INFO, "Edge table shapes",
-            false, LOG_VARIABLE, null, vars);
+            false, LOG_VARIABLE, vars);
 
         new StopLoggerSession().stop(customLogger);
 
@@ -964,9 +954,7 @@ public class RenderingShowcaseTest {
 
     @Test
     public void testFlatLayoutAppliedNoOuterRadius() throws Exception {
-        // The flat layout drops --radius and the body padding. We assert the
-        // rendered log and inline variables no longer reference var(--radius)
-        // and that body uses padding: 0 so content stretches to the viewport.
+        // The log and variable dialog share the flat, edge-to-edge stylesheet.
         String testPath = "src/test/target/test-artifacts/flat-layout-" + System.currentTimeMillis() + "/";
         Files.createDirectories(Paths.get(testPath));
 
@@ -978,7 +966,7 @@ public class RenderingShowcaseTest {
 
         Map<String, Value> vars = new java.util.LinkedHashMap<>();
         vars.put("k", new StringValue("v"));
-        logMessage.action(customLogger, LEVEL_INFO, "flat", false, LOG_VARIABLE, null, vars);
+        logMessage.action(customLogger, LEVEL_INFO, "flat", false, LOG_VARIABLE, vars);
 
         new StopLoggerSession().stop(customLogger);
 
@@ -986,14 +974,14 @@ public class RenderingShowcaseTest {
         Assert.assertFalse(Files.exists(Paths.get(testPath, "variables")), "no variable sidecar files");
         String variablesHtml = CompressedSnapshots.expand(Files.readString(Paths.get(logFilePath)));
 
-        Assert.assertFalse(logHtml.contains("border-radius: var(--radius)"),
+        Assert.assertFalse(logHtml.replaceAll("\\s+", "").contains("border-radius:var(--radius)"),
             "log.html should no longer round outer corners with --radius");
-        Assert.assertFalse(variablesHtml.contains("border-radius: var(--radius)"),
+        Assert.assertFalse(variablesHtml.replaceAll("\\s+", "").contains("border-radius:var(--radius)"),
             "variables.html should no longer round outer corners with --radius");
-        Assert.assertTrue(logHtml.contains("padding: 0"),
-            "log.html body should use padding: 0 for edge-to-edge layout");
-        Assert.assertTrue(variablesHtml.contains("padding: 0"),
-            "variables.html body should use padding: 0 for edge-to-edge layout");
+        Assert.assertTrue(logHtml.replaceAll("\\s+", "").contains("body{margin:0auto;"),
+            "The body has no outer horizontal margin");
+        Assert.assertTrue(variablesHtml.replaceAll("\\s+", "").contains("overflow:hidden;"),
+            "The table scroll area keeps the session header visible");
     }
 
     @Test
@@ -1023,12 +1011,12 @@ public class RenderingShowcaseTest {
         // 1. INFO before failure - no video, no still
         logMessage.action(customLogger, LEVEL_INFO,
             "Bot started; rolling buffer is filling",
-            false, DO_NOT_LOG_VARIABLE, null, null);
+            false, DO_NOT_LOG_VARIABLE, null);
 
         // 2. INFO with manual screenshot - existing path, unchanged
         logMessage.action(customLogger, LEVEL_INFO,
             "Initial state captured for baseline",
-            true, DO_NOT_LOG_VARIABLE, null, null);
+            true, DO_NOT_LOG_VARIABLE, null);
 
         // Wait until the ring has 6 segments (5 stable + 1 in-flight) before the
         // first level-trigger. That gives the WARN clip ~5 s of footage rather
@@ -1042,12 +1030,12 @@ public class RenderingShowcaseTest {
         warnVars.put("lastError", new StringValue("intermittent timeout"));
         logMessage.action(customLogger, LEVEL_WARN,
             "Retrying after timeout - capturing recording for context",
-            false, LOG_VARIABLE, null, warnVars);
+            false, LOG_VARIABLE, warnVars);
 
         // 4. INFO between failures - no video
         logMessage.action(customLogger, LEVEL_INFO,
             "Continuing with retry attempt",
-            false, DO_NOT_LOG_VARIABLE, null, null);
+            false, DO_NOT_LOG_VARIABLE, null);
 
         // Wait for the ring to roll forward to 9 segments so the ERROR clip has
         // ~8 s of footage and is visibly different from the WARN clip.
@@ -1061,7 +1049,7 @@ public class RenderingShowcaseTest {
         errVars.put("retryAttempts", new NumberValue(3));
         logMessage.action(customLogger, LEVEL_ERROR,
             "Maximum retries exceeded - aborting record",
-            false, LOG_VARIABLE, null, errVars);
+            false, LOG_VARIABLE, errVars);
 
         // Stop the session. close() is non-blocking: stage-2 encodes finish on
         // the per-session encoder pool's worker threads after stop returns.

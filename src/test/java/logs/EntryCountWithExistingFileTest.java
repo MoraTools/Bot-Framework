@@ -294,7 +294,7 @@ public class EntryCountWithExistingFileTest {
 
     private int countHeaders(String filePath) throws IOException {
         return (int) Files.readString(Paths.get(filePath)).lines()
-                .filter(line -> line.equals("<!-- a360-log-format:3 -->")).count();
+                .filter(line -> line.equals("<!-- a360-log-format:6 -->")).count();
     }
 
     private void assertWellFormedStructure(String filePath) throws IOException {

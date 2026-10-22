@@ -116,7 +116,6 @@ public class EntryCountVerificationTest {
             "Test message with screenshot",
             true,
             "NO",
-            null,
             null
         );
 

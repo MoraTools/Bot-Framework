@@ -70,3 +70,5 @@ Read values from a CSV file and save them into a dictionary.
 ## 4. Exceptions
 
 - Throws `BotCommandException` if an error occurs during file reading or parsing.
+- Header names are matched without case sensitivity. Both requested headers must exist, even when the file has no data
+  rows. A missing header causes an error that names the missing column. Data rows with missing columns are skipped.

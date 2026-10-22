@@ -8,7 +8,9 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.nio.file.StandardCopyOption;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Locale;
@@ -25,6 +27,7 @@ public final class FfmpegBinary {
     private static final Logger LOGGER = LogManager.getLogger(FfmpegBinary.class);
     private static final String JAR_RESOURCE_PATH = "/ffmpeg/ffmpeg.exe";
     private static final String APP_FOLDER_NAME = "A360-BotFramework";
+    private static final Object EXTRACTION_LOCK = new Object();
 
     /**
      * Full SHA-256 of the bundled ffmpeg.exe. Compile-time constant; the build
@@ -89,33 +92,32 @@ public final class FfmpegBinary {
                 .resolve(BUNDLED_HASH_PREFIX)
                 .resolve("ffmpeg.exe");
 
-        if (Files.exists(target)) {
-            String existing = sha256Hex(target);
-            if (BUNDLED_SHA256.equalsIgnoreCase(existing)) {
-                return target;
-            }
-            LOGGER.warn("Cached ffmpeg.exe at {} has hash {} (expected {}); re-extracting",
-                    target, existing, BUNDLED_SHA256);
-            Files.delete(target);
-        }
-
+        if (Files.exists(target) && BUNDLED_SHA256.equalsIgnoreCase(sha256Hex(target))) return target;
         Files.createDirectories(target.getParent());
-        Path tmp = target.resolveSibling("ffmpeg.exe.tmp");
-        Files.deleteIfExists(tmp);
-
-        try (InputStream in = Objects.requireNonNull(
-                FfmpegBinary.class.getResourceAsStream(JAR_RESOURCE_PATH),
-                "bundled ffmpeg.exe resource not found at " + JAR_RESOURCE_PATH)) {
-            Files.copy(in, tmp);
+        synchronized (EXTRACTION_LOCK) {
+            // Keep the lock file so independent JVMs always lock the same file instance.
+            try (FileChannel channel = FileChannel.open(target.resolveSibling(".extract.lock"),
+                    StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+                 FileLock lock = channel.lock()) {
+                if (Files.exists(target) && BUNDLED_SHA256.equalsIgnoreCase(sha256Hex(target))) return target;
+                Files.deleteIfExists(target);
+                Path tmp = Files.createTempFile(target.getParent(), "ffmpeg-", ".tmp");
+                try {
+                    try (InputStream in = Objects.requireNonNull(
+                            FfmpegBinary.class.getResourceAsStream(JAR_RESOURCE_PATH),
+                            "bundled ffmpeg.exe resource not found at " + JAR_RESOURCE_PATH)) {
+                        Files.copy(in, tmp, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    }
+                    if (!BUNDLED_SHA256.equalsIgnoreCase(sha256Hex(tmp)))
+                        throw new IOException("Bundled ffmpeg.exe does not match its SHA-256");
+                    try { Files.move(tmp, target); }
+                    catch (IOException race) {
+                        if (!Files.exists(target) || !BUNDLED_SHA256.equalsIgnoreCase(sha256Hex(target))) throw race;
+                    }
+                    return target;
+                } finally { Files.deleteIfExists(tmp); }
+            }
         }
-
-        try {
-            Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE);
-        } catch (IOException e) {
-            // Concurrent extractor may have won the race; fall back to non-atomic
-            Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
-        }
-        return target;
     }
 
     private static Iterable<Path> candidateRoots() {

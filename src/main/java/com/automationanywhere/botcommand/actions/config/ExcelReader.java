@@ -178,6 +178,7 @@ public class ExcelReader {
 
             // Initialize data formatter for cell value extraction
             DataFormatter dataFormatter = new DataFormatter();
+            dataFormatter.setUseCachedValuesForFormulaCells(true);
 
             // Determine column indices
             int keyIdx;
@@ -249,6 +250,7 @@ public class ExcelReader {
 
         int columnIndex = -1;
         DataFormatter dataFormatter = new DataFormatter();
+        dataFormatter.setUseCachedValuesForFormulaCells(true);
 
         for (Cell cell : headerRow) {
             if (cell != null && columnName.equalsIgnoreCase(dataFormatter.formatCellValue(cell))) {

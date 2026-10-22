@@ -11,9 +11,12 @@ import com.automationanywhere.commandsdk.model.DataType;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.FilenameUtils;
 
+import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -102,20 +105,45 @@ public class CreateFolders {
                 prefix = "";
             }
 
+            boolean relative = PATH_RELATIVE.equalsIgnoreCase(pathType);
+            if (relative && (baseFolderPath == null || baseFolderPath.isBlank())) {
+                throw new BotCommandException("Base folder path must not be blank");
+            }
+            Path basePath = relative ? Paths.get(baseFolderPath).toAbsolutePath() : null;
+            Path realBasePath = relative ? resolveExistingParents(basePath) : null;
+            // Validate the whole batch before overwrite can delete any folder.
+            List<Path> directoryPaths = new ArrayList<>();
             for (Value folderPathValue : folderPaths) {
-                String folderPath = Paths.get(folderPathValue.get().toString()).toString();
-
-                if (PATH_RELATIVE.equalsIgnoreCase(pathType)) {
-                    folderPath = Paths.get(baseFolderPath, folderPath).toString();
+                String folderPath = folderPathValue.get().toString();
+                if (folderPath.isBlank()) {
+                    throw new BotCommandException("Folder path must not be blank");
                 }
-
                 Path directoryPath = Paths.get(folderPath);
+                if (relative) {
+                    if (directoryPath.isAbsolute()) {
+                        throw new BotCommandException("Relative folder path must not be absolute: " + folderPath);
+                    }
+                    directoryPath = Paths.get(baseFolderPath, folderPath);
+                    Path normalizedPath = directoryPath.toAbsolutePath().normalize();
+                    if (normalizedPath.equals(basePath.normalize()) || !normalizedPath.startsWith(basePath.normalize())) {
+                        throw new BotCommandException("Folder path must be inside the base folder: " + folderPath);
+                    }
+                }
+                Path realDirectoryPath = resolveExistingParents(directoryPath.toAbsolutePath());
+                if (realDirectoryPath.getParent() == null || (relative &&
+                        (realDirectoryPath.equals(realBasePath) || !realDirectoryPath.startsWith(realBasePath)))) {
+                    throw new BotCommandException("Folder path must not be a root, the base folder, or outside the base folder: " + folderPath);
+                }
+                directoryPaths.add(directoryPath);
+            }
+
+            for (Path directoryPath : directoryPaths) {
                 if (Files.exists(directoryPath) && overwriteExisting) {
                     FileUtils.deleteDirectory(directoryPath.toFile());
                 }
 
                 Files.createDirectories(directoryPath);
-                String key = prefix + FilenameUtils.getName(folderPath) + suffix;
+                String key = prefix + FilenameUtils.getName(directoryPath.toString()) + suffix;
                 if (appendToExistingDictionary) {
                     configDictionary.put(key, new StringValue(directoryPath.toString()));
                 }
@@ -127,5 +155,16 @@ public class CreateFolders {
             throw new BotCommandException(e.getMessage(), e);
         }
 
+    }
+
+    private Path resolveExistingParents(Path path) throws IOException {
+        Path existingPath = path;
+        while (!Files.exists(existingPath, LinkOption.NOFOLLOW_LINKS)) {
+            existingPath = existingPath.getParent();
+        }
+        if (!Files.isDirectory(existingPath)) {
+            throw new BotCommandException("Folder path contains a file or an invalid symbolic link: " + path);
+        }
+        return existingPath.toRealPath().resolve(existingPath.relativize(path)).normalize();
     }
 }

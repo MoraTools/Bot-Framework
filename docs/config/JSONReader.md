@@ -65,3 +65,4 @@ Read data from a JSON source, which can be either a file or a text input, and co
 - **Type:** `DictionaryValue`
 - **Description:** A dictionary containing key-value pairs extracted from the JSON data. Keys are constructed from the
   path to each value in the JSON structure, and values are stored as strings.
+- Array keys keep their zero-based index. For example, `{"x":[1,2,3]}` produces `x[0]`, `x[1]`, and `x[2]`.

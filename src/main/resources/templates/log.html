@@ -1,5 +1,6 @@
 <!DOCTYPE html>
-<!-- a360-log-format:3 -->
+<!-- a360-log-format:6 -->
+{{identity}}
 <html lang='en'>
 <head>
     <meta charset='UTF-8'>
@@ -41,6 +42,11 @@
         html { background: var(--surface); }
         body {
             margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            height: 100dvh;
+            overflow: hidden;
             color: var(--text);
             background: var(--surface);
             font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
@@ -51,17 +57,22 @@
         ::selection { background: var(--primary-soft); color: var(--text); }
         a { color: var(--primary); text-underline-offset: 3px; }
         :focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
-        .log-scroll { height: 100vh; overflow: auto; scrollbar-color: var(--muted) var(--surface-2); }
-        .log-table { width: 100%; min-width: 1100px; border-collapse: separate; border-spacing: 0; table-layout: fixed; }
+        .session-context { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 14px 18px; flex-shrink: 0; border-bottom: 1px solid var(--border); }
+        .session-context h1 { margin: 0; font-size: 18px; font-weight: 650; line-height: 1.3; flex-shrink: 0; }
+        .identity { display: flex; flex-wrap: wrap; gap: 10px 24px; min-width: 0; margin: 0; }
+        .identity > div { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+        .identity dt { font-size: 12px; color: var(--muted); }
+        .identity dd { margin: 0; font-weight: 600; }
+        .log-scroll { flex: 1; min-height: 0; min-width: 0; width: 100%; overflow: auto; scrollbar-color: var(--muted) var(--surface-2); }
+        .log-table { width: 100%; min-width: 1060px; border-collapse: separate; border-spacing: 0; table-layout: fixed; }
         .log-table th { position: sticky; top: 0; z-index: 2; background: #185abc; color: white; text-align: left; font-size: 11px; text-transform: uppercase; }
         .log-table th, .log-table td { padding: 8px 10px; vertical-align: top; border-bottom: 1px solid var(--border); }
-        .log-table th:nth-child(1) { width: 150px; }
+        .log-table th:nth-child(1) { width: 160px; }
         .log-table th:nth-child(2) { width: 70px; }
-        .log-table th:nth-child(3) { width: 19%; }
-        .log-table th:nth-child(4), .log-table th:nth-child(5) { width: 108px; }
-        .log-table th:nth-child(7) { width: 128px; }
-        .log-table th:nth-child(8) { width: 116px; }
-        .log-entry > td:nth-child(-n+5) { font-size: 12px; line-height: 1.4; }
+        .log-table th:nth-child(3) { width: 23%; }
+        .log-table th:nth-child(5) { width: 128px; }
+        .log-table th:nth-child(6) { width: 116px; }
+        .log-entry > td:nth-child(-n+3) { font-size: 12px; line-height: 1.4; }
         .vars-link { font-size: 12px; white-space: nowrap; }
         .log-entry > td:first-child { font-variant-numeric: tabular-nums; }
         .log-entry:nth-child(even) { background: var(--surface-2); }
@@ -89,7 +100,7 @@
         #detail-content > img, #detail-content > video { display: block; max-width: 100%; max-height: 65vh; margin: auto; }
         .empty-log { padding: 20px; color: var(--muted); }
         body:has(.log-entry) .empty-log { display: none; }
-        .message-cell { white-space: pre-wrap; overflow-wrap: anywhere; }
+        .log-entry > td:nth-child(4) { white-space: pre-wrap; overflow-wrap: anywhere; }
         .entry-variables { margin-top: 10px; }
         summary { cursor: pointer; min-height: 36px; padding: 6px 0; }
         summary:hover { color: var(--primary); }
@@ -139,7 +150,8 @@
         .ws-marker { color: var(--muted); user-select: none; }
         .ws-tab { font-size: 0.85em; margin-right: -0.4em; }
         .ws-nl { font-size: 0.85em; margin-left: 2px; }
-        .ws-trail { font-family: var(--mono); }
+        .ws-trail { position: relative; }
+        .ws-trail > .ws-marker { position: absolute; left: 0; top: 0; pointer-events: none; }
         .img-link { display: inline-flex; position: relative; border-radius: var(--radius-sm); }
         .img-link img {
             display: block;
@@ -185,6 +197,8 @@
             pointer-events: none;
         }
         @media (max-width: 768px) {
+            .session-context { align-items: start; flex-direction: column; gap: 10px; padding: 14px; }
+            .identity > div { display: grid; gap: 1px; }
             button { min-height: 44px; }
             summary { min-height: 44px; padding-top: 10px; padding-bottom: 10px; }
             .table-container th, .table-container td { min-width: 120px; padding: 8px 10px; }
@@ -197,6 +211,10 @@
     </style>
 </head>
 <body>
+<header class='session-context'>
+    <h1>Bot Framework Logs</h1>
+    <dl class='identity'><div><dt>Machine</dt><dd>{{machine}}</dd></div><div><dt>User</dt><dd>{{user}}</dd></div></dl>
+</header>
 <dialog id='detail' closedby='any' aria-labelledby='detail-title' aria-describedby='detail-context'>
     <div class='dialog-heading'><h2 id='detail-title'>Variables</h2><button type='button' id='detail-close' autofocus>Close</button></div>
     <p id='detail-context'></p><div id='detail-content' aria-live='polite'></div>
@@ -279,9 +297,9 @@
 })();
 </script>
 <noscript>JavaScript is required to open compressed variables. Messages and media links remain available.</noscript>
-<p class='empty-log'>No entries yet.</p>
 <div class='log-scroll' tabindex='0' role='region' aria-label='Log entries'>
+<p class='empty-log'>No entries yet.</p>
 <table class='log-table'>
-<thead><tr><th scope='col'>Datetime</th><th scope='col'>Level</th><th scope='col'>Source</th><th scope='col'>Machine</th><th scope='col'>User</th><th scope='col'>Message</th><th scope='col'>Variables</th><th scope='col'>Screen</th></tr></thead>
+<thead><tr><th scope='col'>Datetime</th><th scope='col'>Level</th><th scope='col'>Source</th><th scope='col'>Message</th><th scope='col'>Variables</th><th scope='col'>Screen</th></tr></thead>
 <tbody>
 <!-- a360-log-header:end -->

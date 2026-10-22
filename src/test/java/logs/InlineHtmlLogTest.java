@@ -56,6 +56,26 @@ public class InlineHtmlLogTest {
         return Files.readString(path).lines().filter(line -> line.equals(END.trim())).count();
     }
 
+    private static void assertSessionLayout(Path path) throws Exception {
+        String html = Files.readString(path);
+        Assert.assertEquals(html.split("<header class='session-context'>", -1).length - 1, 1);
+        Assert.assertEquals(html.split("<h1>Bot Framework Logs</h1>", -1).length - 1, 1);
+        Assert.assertTrue(html.contains("<dt>Machine</dt><dd>"
+                + org.apache.commons.text.StringEscapeUtils.escapeHtml4(CustomHTMLLayout.machineName()) + "</dd>"));
+        Assert.assertTrue(html.contains("<dt>User</dt><dd>"
+                + org.apache.commons.text.StringEscapeUtils.escapeHtml4(CustomHTMLLayout.userName()) + "</dd>"));
+        Assert.assertTrue(html.indexOf("</header>") < html.indexOf("<div class='log-scroll'"));
+        Assert.assertEquals(html.split("<th scope='col'>", -1).length - 1, 6);
+        for (String column : List.of("Datetime", "Level", "Source", "Message", "Variables", "Screen")) {
+            Assert.assertTrue(html.contains("<th scope='col'>" + column + "</th>"));
+        }
+        java.util.regex.Matcher rows = java.util.regex.Pattern.compile("<tr class='log-entry [^']*'>(.*?)</tr>",
+                java.util.regex.Pattern.DOTALL).matcher(html);
+        while (rows.find()) {
+            Assert.assertEquals(rows.group(1).split("<td(?: [^>]*)?>", -1).length - 1, 6);
+        }
+    }
+
     @Test
     public void publicOverloadsKeepRoutingScreenshotPathsAndUniqueSessionIds() throws Exception {
         Set<String> sessionIds = new HashSet<>();
@@ -101,6 +121,7 @@ public class InlineHtmlLogTest {
                                 split ? event == level : event != Level.DEBUG);
                     }
                     Assert.assertEquals(entries(Path.of(paths.get(level))), split ? 1L : 4L);
+                    assertSessionLayout(Path.of(paths.get(level)));
                 }
             }
         }
@@ -155,6 +176,8 @@ public class InlineHtmlLogTest {
         Assert.assertEquals(CompressedSnapshots.expand(Files.readString(archive)).split("row-29", -1).length - 1, 2);
         Assert.assertTrue(CompressedSnapshots.expand(Files.readString(log)).contains("row-29"));
         Assert.assertFalse(Files.exists(dir.resolve("2_log.html")));
+        assertSessionLayout(archive);
+        assertSessionLayout(log);
     }
 
     @Test
@@ -196,24 +219,92 @@ public class InlineHtmlLogTest {
         Assert.assertEquals(entries(log), 1L);
     }
 
-    @Test
-    public void formatTwoLogIsArchivedByteForByte() throws Exception {
-        Path dir = Files.createTempDirectory("format-two");
+    @DataProvider
+    public Object[][] oldFormats() {
+        return new Object[][] {{2}, {3}, {4}, {5}};
+    }
+
+    @Test(dataProvider = "oldFormats")
+    public void earlierFormatsAreArchivedByteForByte(int format) throws Exception {
+        Path dir = Files.createTempDirectory("old-format");
         Path log = dir.resolve("log.html");
-        byte[] original = ("<!DOCTYPE html>\n<!-- a360-log-format:2 -->\n"
+        byte[] original = ("<!DOCTYPE html>\n<!-- a360-log-format:" + format + " -->\n"
                 + "<!-- a360-log-header:end -->\n<article>日本語</article>\n" + END)
                 .getBytes(StandardCharsets.UTF_8);
         Files.write(log, original);
         write(log, 10, entry("new table entry", null));
         Assert.assertEquals(Files.readAllBytes(dir.resolve("1_log.html")), original);
         String html = Files.readString(log);
-        Assert.assertTrue(html.contains("<!-- a360-log-format:3 -->"));
+        Assert.assertTrue(html.contains("<!-- a360-log-format:6 -->"));
         Assert.assertTrue(html.contains("<tr class='log-entry level-INFO'>"));
         Assert.assertFalse(html.contains("<article>"));
-        for (String column : List.of("Datetime", "Level", "Source", "Machine", "User", "Message", "Variables", "Screen")) {
-            Assert.assertTrue(html.contains("<th scope='col'>" + column + "</th>"));
-        }
+        assertSessionLayout(log);
         Assert.assertEquals(entries(log), 1L);
+    }
+
+    @Test
+    public void anotherJvmPreservesIdentityAndArchivesAnAccountChange() throws Exception {
+        Path dir = Files.createTempDirectory("header-identity");
+        Path log = dir.resolve("log.html");
+        String account = "operator <script>unsafe()</script> & \" 日本語 {{machine}} $ \\";
+        writeAsUser(log, account, "first JVM");
+        String first = Files.readString(log);
+        Assert.assertTrue(first.contains("<dt>User</dt><dd>"
+                + org.apache.commons.text.StringEscapeUtils.escapeHtml4(account) + "</dd>"));
+        Assert.assertFalse(first.contains("<script>unsafe()</script>"));
+        writeAsUser(log, account, "same account JVM");
+        Assert.assertTrue(Files.readString(log).startsWith(first));
+        Assert.assertFalse(Files.exists(dir.resolve("1_log.html")));
+        byte[] beforeChange = Files.readAllBytes(log);
+        writeAsUser(log, "another account", "changed account JVM");
+        Assert.assertEquals(Files.readAllBytes(dir.resolve("1_log.html")), beforeChange);
+        String changed = Files.readString(log);
+        Assert.assertTrue(changed.contains("<dt>User</dt><dd>another account</dd>"));
+        Assert.assertFalse(changed.contains("same account JVM"));
+        Assert.assertFalse(changed.contains("unsafe()"));
+        Assert.assertEquals(entries(log), 1L);
+        writeAsUser(log, "another account", "reopened changed account");
+        Assert.assertEquals(entries(log), 2L);
+        Assert.assertFalse(Files.exists(dir.resolve("2_log.html")));
+        byte[] beforeMissingAccount = Files.readAllBytes(log);
+        writeAsUser(log, null, "missing account JVM");
+        Assert.assertEquals(Files.readAllBytes(dir.resolve("2_log.html")), beforeMissingAccount);
+        Assert.assertTrue(Files.readString(log).contains("<dt>User</dt><dd>null</dd>"));
+        Assert.assertEquals(entries(log), 1L);
+        writeAsUser(log, null, "reopened missing account");
+        Assert.assertEquals(entries(log), 2L);
+        Assert.assertFalse(Files.exists(dir.resolve("3_log.html")));
+    }
+
+    private void writeAsUser(Path log, String user, String message) throws Exception {
+        Set<String> classpath = new java.util.LinkedHashSet<>();
+        for (Class<?> type : new Class<?>[] { getClass(), CustomLogger.class, org.json.JSONObject.class, Assert.class,
+                org.apache.logging.log4j.Logger.class, org.apache.logging.log4j.core.LoggerContext.class,
+                org.apache.commons.io.FilenameUtils.class, org.apache.commons.lang3.StringUtils.class,
+                org.apache.commons.text.StringEscapeUtils.class,
+                com.automationanywhere.core.security.SecureString.class,
+                com.automationanywhere.botcommand.data.impl.SessionValue.class,
+                com.automationanywhere.toolchain.runtime.session.CloseableSessionObject.class, com.google.protobuf.Message.class }) {
+            classpath.add(Path.of(type.getProtectionDomain().getCodeSource().getLocation().toURI()).toString());
+        }
+        classpath.add(Path.of("build/resources/main").toAbsolutePath().toString());
+        Path output = log.resolveSibling("identity-jvm.log");
+        Process child = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-Duser.name=" + user, "-Djava.awt.headless=true", "-cp", String.join(java.io.File.pathSeparator, classpath),
+                getClass().getName(), log.toString(), message, user == null ? "clear-user-name" : "keep-user-name")
+                .redirectErrorStream(true).redirectOutput(output.toFile()).start();
+        if (!child.waitFor(30, TimeUnit.SECONDS)) {
+            child.destroyForcibly();
+            Assert.fail("identity JVM did not complete");
+        }
+        Assert.assertEquals(child.exitValue(), 0, Files.readString(output));
+    }
+
+    public static void main(String[] args) throws Exception {
+        boolean missingAccount = args.length > 2 && args[2].equals("clear-user-name");
+        if (missingAccount) System.clearProperty("user.name");
+        write(Path.of(args[0]), 100, entry(args[1], null));
+        if (missingAccount) Assert.assertNull(CustomHTMLLayout.userName());
     }
 
     @Test

@@ -25,6 +25,9 @@ folders.
 - **Type:** `List<Value>`
 - **Description:** List of folder names or paths to create. For relative paths, they are relative to the base folder
   path.
+- All paths are checked before any folder is created or overwritten. Blank paths and filesystem roots are rejected.
+  Relative paths must stay inside the base folder and must not target the base folder itself. These checks include paths
+  through existing symbolic links.
 
 ### Overwrite Existing Folders
 
@@ -60,6 +63,7 @@ folders.
 Throws `BotCommandException` if:
 
 - Invalid paths are provided.
+- A path is blank or targets a filesystem root. In relative mode, a path targets the base folder itself or leaves it.
 - There are permissions issues.
 - Overwriting existing folders fails.
 - Any other unexpected error occurs during folder creation.

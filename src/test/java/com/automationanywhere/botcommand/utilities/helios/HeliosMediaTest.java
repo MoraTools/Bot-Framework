@@ -361,7 +361,8 @@ public class HeliosMediaTest {
                     JSONObject reply;
                     if (parts.length == 4) {
                         starts.add(body);
-                        reply = new JSONObject().put("sessionId", body.optString("loggerSessionId", sessionId)).put("media", caps());
+                        reply = new JSONObject().put("sessionId", body.optString("loggerSessionId", sessionId))
+                                .put("executionSessionId", sessionId).put("executionId", body.getString("executionId")).put("media", caps());
                     }
                     else if ("entries".equals(parts[5])) {
                         int count = body.getJSONArray("entries").length();

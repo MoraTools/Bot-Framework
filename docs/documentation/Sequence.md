@@ -24,7 +24,7 @@ screenshots for enhanced clarity and visual guidance.
 For each image capture option:
 
 - **Capture Image Checkbox:** Indicates whether an image should be captured for a particular step within the sequence.
-- **Detail About Captured Image:** Provides textual context or explanation for the captured image.
+- **Detail About Captured Image:** A `String` caption for the captured image.
 - **Image:** The actual image to be included, relevant to the specific step in the sequence. This field is active only
   if the corresponding capture image checkbox is selected.
 

@@ -157,6 +157,15 @@ public class CSVReader {
             // Parse CSV content
             csvParser = CSVParser.parse(reader, csvFormat);
 
+            if (hasHeader) {
+                Map<String, Integer> headers = csvParser.getHeaderMap();
+                for (String columnName : new String[]{keyColumnName, valueColumnName}) {
+                    if (!headers.containsKey(columnName)) {
+                        throw new BotCommandException("Column '" + columnName + "' not found in CSV header");
+                    }
+                }
+            }
+
             // Process CSV records
             for (CSVRecord csvRecord : csvParser) {
                 if (csvRecord.size() == 0) {
@@ -184,7 +193,7 @@ public class CSVReader {
                         }
                     }
                 } catch (IllegalArgumentException e) {
-                    // Skip records where header is not found or index is out of bounds
+                    // Skip records that do not contain the requested columns.
                     continue;
                 }
 

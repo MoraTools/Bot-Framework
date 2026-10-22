@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpServer;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.testng.Assert;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -17,6 +18,288 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 
 public class HeliosDeliveryTest {
+    @Test
+    public void capableReceiverGetsCompactEntriesWithOneSavedIdentity() throws Exception {
+        try (Server server = new Server()) {
+            server.sessionIdentity = true;
+            Path root = Files.createTempDirectory("helios-compact-identity");
+            HeliosSink sink = new HeliosSink(server.config("compact"), root, ignored -> { });
+            JSONObject record = entry(0);
+            record.getJSONArray("entries").getJSONObject(0)
+                    .put("variables", new JSONArray().put(new JSONObject().put("name", "saved").put("value", "before")))
+                    .put("media", new JSONArray().put(new JSONObject().put("kind", "screenshot").put("state", "pending")));
+            sink.append(record);
+            try (java.util.stream.Stream<Path> paths = Files.walk(root)) {
+                Path journal = paths.filter(path -> path.toString().endsWith(".helios-journal")).findFirst().orElseThrow();
+                java.util.List<String> lines = Files.readAllLines(journal, StandardCharsets.UTF_8);
+                JSONObject start = new JSONObject(lines.get(0));
+                Assert.assertTrue(start.getBoolean("sessionIdentity"));
+                Assert.assertEquals(start.getString("machine"), "machine");
+                Assert.assertEquals(start.getString("user"), "user");
+                Assert.assertEquals(lines.get(1), record.toString(), "capture does not depend on the start response");
+            }
+            Assert.assertTrue(sink.finish("ERROR", 1));
+            JSONObject sent = new JSONObject(server.bodies.get(0)).getJSONArray("entries").getJSONObject(0);
+            Assert.assertFalse(sent.has("machine"));
+            Assert.assertFalse(sent.has("user"));
+            Assert.assertTrue(sent.similar(record.getJSONArray("entries").getJSONObject(0)),
+                    "the variable snapshot and optional media declaration stay intact");
+        }
+    }
+
+    @DataProvider
+    public Object[][] legacyCapabilities() {
+        return new Object[][] { { null }, { false }, { JSONObject.NULL }, { "true" }, { 1 },
+                { new JSONObject().put("version", 1) } };
+    }
+
+    @Test(dataProvider = "legacyCapabilities")
+    public void absentFalseOrUnknownCapabilityGetsLegacyEntryIdentity(Object capability) throws Exception {
+        try (Server server = new Server()) {
+            server.sessionIdentity = capability;
+            HeliosSink sink = new HeliosSink(server.config("legacy"),
+                    Files.createTempDirectory("helios-legacy-identity"), ignored -> { });
+            JSONObject record = entry(0);
+            sink.append(record);
+            Assert.assertTrue(sink.finish("OK", 1));
+            JSONObject sent = new JSONObject(server.bodies.get(0)).getJSONArray("entries").getJSONObject(0);
+            Assert.assertEquals(sent.getString("machine"), "machine");
+            Assert.assertEquals(sent.getString("user"), "user");
+            sent.remove("machine");
+            sent.remove("user");
+            Assert.assertTrue(sent.similar(record.getJSONArray("entries").getJSONObject(0)));
+            Assert.assertFalse(record.getJSONArray("entries").getJSONObject(0).has("machine"));
+            Assert.assertFalse(record.getJSONArray("entries").getJSONObject(0).has("user"));
+        }
+    }
+
+    @DataProvider
+    public Object[][] recoveryCapabilities() { return new Object[][] { { false }, { true } }; }
+
+    @Test
+    public void preStreamReceiverRetainsSeparateLoggerJournalsWithoutSendingRowsOrEnds() throws Exception {
+        try (Server server = new Server()) {
+            server.streamContract = false;
+            Path root = Files.createTempDirectory("helios-pre-stream");
+            java.util.List<String> parentWarnings = new CopyOnWriteArrayList<>();
+            java.util.List<String> childWarnings = new CopyOnWriteArrayList<>();
+            HeliosConfig config = server.config("same-aa-run");
+            HeliosSink parent = new HeliosSink(config, root, parentWarnings::add, UUID.randomUUID().toString());
+            HeliosSink child = new HeliosSink(config, root, childWarnings::add, UUID.randomUUID().toString());
+            JSONObject parentEntry = entry(0);
+            JSONObject childEntry = entry(0);
+            childEntry.getJSONArray("entries").getJSONObject(0).put("message", "child ERROR");
+            parent.append(parentEntry);
+            child.append(childEntry);
+            Assert.assertFalse(parent.finish("OK", 1));
+            Assert.assertFalse(child.finish("ERROR", 1));
+            Assert.assertTrue(server.bodies.isEmpty(), "no colliding ordinal is sent");
+            Assert.assertTrue(server.ends.isEmpty(), "unsupported streams cannot claim a verified end");
+            Assert.assertEquals(parentWarnings.size(), 1);
+            Assert.assertEquals(childWarnings.size(), 1);
+            Assert.assertTrue(parentWarnings.get(0).contains("did not confirm separate logger streams"));
+            java.util.Set<String> savedMessages = new java.util.HashSet<>();
+            java.util.Set<String> ids = new java.util.HashSet<>();
+            try (java.util.stream.Stream<Path> paths = Files.walk(root)) {
+                for (Path path : paths.filter(file -> file.toString().endsWith(".helios-journal"))
+                        .collect(java.util.stream.Collectors.toList())) {
+                    java.util.List<String> saved = Files.readAllLines(path, StandardCharsets.UTF_8);
+                    Assert.assertEquals(saved.size(), 3, "start, exact row, and closing record all survive");
+                    JSONObject start = new JSONObject(saved.get(0));
+                    Assert.assertEquals(start.getString("executionId"), "same-aa-run");
+                    ids.add(start.getString("loggerSessionId"));
+                    JSONObject savedEntry = new JSONObject(saved.get(1));
+                    Assert.assertEquals(savedEntry.getInt("firstOrdinal"), 0);
+                    savedMessages.add(savedEntry.getJSONArray("entries").getJSONObject(0).getString("message"));
+                    Assert.assertEquals(new JSONObject(saved.get(2)).getInt("expectedEntries"), 1);
+                }
+            }
+            Assert.assertEquals(ids.size(), 2);
+            Assert.assertEquals(savedMessages, java.util.Set.of("entry 0", "child ERROR"));
+        }
+    }
+
+    @DataProvider
+    public Object[][] invalidStreamResponses() {
+        String id = UUID.nameUUIDFromBytes("invalid".getBytes(StandardCharsets.UTF_8)).toString();
+        return new Object[][] {
+                { new JSONObject().put("executionSessionId", JSONObject.NULL) },
+                { new JSONObject().put("executionSessionId", "1-2-3-4-5") },
+                { new JSONObject().put("executionSessionId", id) },
+                { new JSONObject().put("executionId", "another-aa-run") }
+        };
+    }
+
+    @Test(dataProvider = "invalidStreamResponses")
+    public void invalidStreamReceiptCannotSendOrVerifyANewJournal(JSONObject response) throws Exception {
+        try (Server server = new Server()) {
+            server.startOverride = response;
+            java.util.List<String> warnings = new CopyOnWriteArrayList<>();
+            Path root = Files.createTempDirectory("helios-invalid-stream");
+            HeliosSink sink = new HeliosSink(server.config("invalid"), root, warnings::add);
+            sink.append(entry(0));
+            Assert.assertFalse(sink.finish("OK", 1));
+            Assert.assertTrue(server.bodies.isEmpty());
+            Assert.assertTrue(server.ends.isEmpty());
+            Assert.assertEquals(warnings.size(), 1);
+            Assert.assertTrue(warnings.get(0).contains("did not confirm separate logger streams"));
+            Assert.assertEquals(server.startAttempts.get("invalid").intValue(), 1);
+            try (java.util.stream.Stream<Path> paths = Files.walk(root)) {
+                Assert.assertEquals(paths.filter(path -> path.toString().endsWith(".helios-journal")).count(), 1L);
+            }
+        }
+    }
+
+    @Test
+    public void preStreamReceiverStillRecoversLegacyJournals() throws Exception {
+        try (Server server = new Server()) {
+            server.streamContract = false;
+            Path root = Files.createTempDirectory("helios-pre-stream-recovery");
+            Path legacy = seed(root, server.config("legacy-saved"), "a", 1, false);
+            HeliosSink current = new HeliosSink(server.config("new"), root, ignored -> { });
+            try {
+                await(() -> !Files.exists(legacy));
+                Assert.assertTrue(server.verified.contains("legacy-saved"));
+                Assert.assertFalse(server.starts.get("legacy-saved").has("loggerSessionId"));
+                Assert.assertEquals(server.bodies.size(), 1);
+            } finally { Assert.assertFalse(current.finish("OK", 0)); }
+        }
+    }
+
+    @Test
+    public void supportedStreamsKeepIndependentOrdinalsAndEndsForOneAaRun() throws Exception {
+        try (Server server = new Server()) {
+            server.separateStreams = true;
+            Path root = Files.createTempDirectory("helios-independent-streams");
+            String parentId = UUID.randomUUID().toString();
+            String childId = UUID.randomUUID().toString();
+            HeliosSink parent = new HeliosSink(server.config("same-aa-run"), root, ignored -> { }, parentId);
+            HeliosSink child = new HeliosSink(server.config("same-aa-run"), root, ignored -> { }, childId);
+            JSONObject childEntry = entry(0);
+            childEntry.getJSONArray("entries").getJSONObject(0).put("message", "child ERROR");
+            parent.append(entry(0));
+            child.append(childEntry);
+            Assert.assertTrue(parent.finish("OK", 1));
+            Assert.assertTrue(child.finish("ERROR", 1));
+            Assert.assertEquals(server.rows.size(), 2);
+            Assert.assertEquals(server.rows.get(parentId + ":0").getString("message"), "entry 0");
+            Assert.assertEquals(server.rows.get(childId + ":0").getString("message"), "child ERROR");
+            Assert.assertEquals(server.ends.get("same-aa-run").intValue(), 2);
+            Assert.assertEquals(server.startAttempts.get("same-aa-run").intValue(), 2);
+            try (java.util.stream.Stream<Path> paths = Files.walk(root)) {
+                Assert.assertFalse(paths.anyMatch(path -> path.toString().endsWith(".helios-journal")));
+            }
+        }
+    }
+
+    @Test
+    public void supportedResponseAllowsUppercaseUuidsAndTheServersExecutionIdLimit() throws Exception {
+        try (Server server = new Server()) {
+            String execution = "activity-" + "x".repeat(300);
+            String id = UUID.nameUUIDFromBytes(execution.getBytes(StandardCharsets.UTF_8)).toString();
+            server.startOverride = new JSONObject().put("sessionId", id.toUpperCase(java.util.Locale.ROOT))
+                    .put("executionSessionId", UUID.randomUUID().toString().toUpperCase(java.util.Locale.ROOT));
+            HeliosSink sink = new HeliosSink(server.config(execution), Files.createTempDirectory("helios-normalized-response"),
+                    ignored -> { });
+            sink.append(entry(0));
+            Assert.assertTrue(sink.finish("OK", 1));
+            Assert.assertEquals(server.starts.get(execution).getString("executionId"), execution,
+                    "the request keeps the exact AA execution ID");
+            Assert.assertEquals(server.rows.get(id + ":0").getString("machine"), "machine");
+            Assert.assertEquals(server.rows.get(id + ":0").getString("user"), "user");
+        }
+    }
+
+    @Test
+    public void legacyEndResponseRetainsTheCompactJournal() throws Exception {
+        try (Server server = new Server()) {
+            server.legacyEnd = true;
+            Path root = Files.createTempDirectory("helios-legacy-end");
+            HeliosSink sink = new HeliosSink(server.config("legacy-end"), root, ignored -> { });
+            sink.append(entry(0));
+            Assert.assertFalse(sink.finish("OK", 1), "an empty 204 cannot verify delivery");
+            try (java.util.stream.Stream<Path> paths = Files.walk(root)) {
+                Path journal = paths.filter(path -> path.toString().endsWith(".helios-journal")).findFirst().orElseThrow();
+                JSONObject saved = new JSONObject(Files.readAllLines(journal, StandardCharsets.UTF_8).get(1));
+                Assert.assertFalse(saved.getJSONArray("entries").getJSONObject(0).has("machine"));
+                Assert.assertFalse(saved.getJSONArray("entries").getJSONObject(0).has("user"));
+            }
+            Assert.assertFalse(server.verified.contains("legacy-end"));
+        }
+    }
+
+    @Test(dataProvider = "recoveryCapabilities")
+    public void recoveryNegotiatesAgainAndUsesTheOriginalJournalIdentity(boolean capability) throws Exception {
+        try (Server server = new Server()) {
+            Path root = Files.createTempDirectory("helios-recovered-identity");
+            server.sessionIdentity = true;
+            server.busy.set(true);
+            HeliosSink first = new HeliosSink(server.config("original", "old machine á", "old user 漢"), root, ignored -> { });
+            first.append(entry(0));
+            Assert.assertFalse(first.finish("OK", 1));
+            Path journal;
+            try (java.util.stream.Stream<Path> paths = Files.walk(root)) {
+                journal = paths.filter(path -> path.toString().endsWith(".helios-journal")).findFirst().orElseThrow();
+            }
+            java.util.List<String> saved = Files.readAllLines(journal, StandardCharsets.UTF_8);
+            JSONObject originalStart = new JSONObject(saved.get(0));
+            Assert.assertTrue(originalStart.getBoolean("sessionIdentity"));
+            JSONObject savedEntry = new JSONObject(saved.get(1)).getJSONArray("entries").getJSONObject(0);
+            Assert.assertFalse(savedEntry.has("machine"));
+            Assert.assertFalse(savedEntry.has("user"));
+            server.sessionIdentity = capability;
+            server.busy.set(false);
+            HeliosSink next = new HeliosSink(server.config("current", "new machine", "new user"), root, ignored -> { });
+            try {
+                await(() -> server.verified.contains("original"));
+                await(() -> !Files.exists(journal));
+                JSONObject recoveredStart = server.starts.get("original");
+                Assert.assertTrue(recoveredStart.similar(originalStart), "recovery keeps the saved UUID and start metadata");
+                Assert.assertEquals(server.startAttempts.get("original").intValue(), 2);
+                String id = UUID.nameUUIDFromBytes("original".getBytes(StandardCharsets.UTF_8)).toString();
+                JSONObject sent = server.rows.get(id + ":0");
+                if (capability) {
+                    Assert.assertFalse(sent.has("machine"));
+                    Assert.assertFalse(sent.has("user"));
+                } else {
+                    Assert.assertEquals(sent.getString("machine"), "old machine á");
+                    Assert.assertEquals(sent.getString("user"), "old user 漢");
+                }
+                Assert.assertEquals(sent.getString("timestamp"), "original 0");
+            } finally { Assert.assertTrue(next.finish("OK", 0)); }
+        }
+    }
+
+    @Test(dataProvider = "recoveryCapabilities")
+    public void oldJournalExplicitOverridesAndEmptyValuesStayIntact(boolean capability) throws Exception {
+        try (Server server = new Server()) {
+            server.sessionIdentity = capability;
+            Path root = Files.createTempDirectory("helios-old-identity");
+            HeliosConfig original = server.config("old");
+            Path path = seed(root, original, "a", 2, false);
+            JSONObject start = new JSONObject().put("executionId", "old")
+                    .put("machine", "old machine").put("user", "old user");
+            JSONObject override = entry(0);
+            override.getJSONArray("entries").getJSONObject(0).put("machine", "row machine").put("user", "");
+            JSONObject blank = entry(1);
+            blank.getJSONArray("entries").getJSONObject(0).put("machine", "").put("user", "row user");
+            String saved = start + "\n" + override + "\n" + blank + "\n"
+                    + new JSONObject().put("status", "OK").put("expectedEntries", 3) + "\n";
+            Files.writeString(path, saved, StandardCharsets.UTF_8);
+            HeliosSink next = new HeliosSink(server.config("current", "new machine", "new user"), root, ignored -> { });
+            try {
+                await(() -> server.ends.getOrDefault("old", 0) == 2);
+                Assert.assertEquals(Files.readString(path, StandardCharsets.UTF_8), saved,
+                        "fallback and failed end replay must not alter durable records");
+                String id = UUID.nameUUIDFromBytes("old".getBytes(StandardCharsets.UTF_8)).toString();
+                Assert.assertTrue(server.rows.get(id + ":0").similar(override.getJSONArray("entries").getJSONObject(0)));
+                Assert.assertTrue(server.rows.get(id + ":1").similar(blank.getJSONArray("entries").getJSONObject(0)));
+                Assert.assertFalse(server.starts.get("old").has("sessionIdentity"), "an old journal is not opted in during recovery");
+                Assert.assertFalse(server.verified.contains("old"));
+            } finally { Assert.assertTrue(next.finish("OK", 0)); }
+        }
+    }
+
     @Test
     public void lostResponseAndMiddleGapAreReplayedBeforeDeletion() throws Exception {
         try (Server server = new Server()) {
@@ -120,7 +403,9 @@ public class HeliosDeliveryTest {
     @Test
     public void rejectedMultiEntryBatchesCanSplitWithoutLosingEntries() throws Exception {
         try (Server server = new Server()) {
-            server.maxRequestBytes = entry(0).toString().getBytes(StandardCharsets.UTF_8).length;
+            JSONObject single = entry(0);
+            single.getJSONArray("entries").getJSONObject(0).put("machine", "machine").put("user", "user");
+            server.maxRequestBytes = single.toString().getBytes(StandardCharsets.UTF_8).length;
             HeliosSink sink = new HeliosSink(server.config("split"),
                     Files.createTempDirectory("helios-split"), ignored -> { });
             sink.append(entry(0));
@@ -187,7 +472,14 @@ public class HeliosDeliveryTest {
     private static final class Server implements AutoCloseable {
         final HttpServer server = HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
         volatile int maxRequestBytes = Integer.MAX_VALUE;
+        volatile Object sessionIdentity;
+        volatile boolean legacyEnd;
+        volatile boolean streamContract = true;
+        volatile boolean separateStreams;
+        volatile JSONObject startOverride;
         final Map<String, Integer> ends = new ConcurrentHashMap<>();
+        final Map<String, JSONObject> starts = new ConcurrentHashMap<>();
+        final Map<String, Integer> startAttempts = new ConcurrentHashMap<>();
         final AtomicBoolean busy = new AtomicBoolean();
         final AtomicBoolean loseResponse = new AtomicBoolean();
         final AtomicBoolean omitMiddle = new AtomicBoolean();
@@ -204,9 +496,20 @@ public class HeliosDeliveryTest {
                 JSONObject reply;
                 if (path.endsWith("/sessions")) {
                     String execution = body.getString("executionId");
-                    String id = UUID.nameUUIDFromBytes(execution.getBytes(StandardCharsets.UTF_8)).toString();
+                    String id = separateStreams && body.has("loggerSessionId") ? body.getString("loggerSessionId")
+                            : UUID.nameUUIDFromBytes(execution.getBytes(StandardCharsets.UTF_8)).toString();
                     executions.put(id, execution);
-                    reply = new JSONObject().put("sessionId", id);
+                    starts.put(execution, body);
+                    startAttempts.merge(execution, 1, Integer::sum);
+                    reply = new JSONObject().put("sessionId", id)
+                            .put("executionId", execution.substring(0, Math.min(execution.length(), 256)));
+                    if (streamContract) reply.put("executionSessionId",
+                            UUID.nameUUIDFromBytes(("execution:" + execution).getBytes(StandardCharsets.UTF_8)).toString());
+                    if (startOverride != null) {
+                        for (String key : startOverride.keySet()) reply.put(key, startOverride.get(key));
+                    }
+                    if (sessionIdentity != null && body.optBoolean("sessionIdentity"))
+                        reply.put("sessionIdentity", sessionIdentity);
                 } else {
                     String id = path.split("/")[4];
                     if (path.endsWith("/entries")) {
@@ -235,6 +538,11 @@ public class HeliosDeliveryTest {
                         }
                     } else {
                         ends.merge(executions.get(id), 1, Integer::sum);
+                        if (legacyEnd) {
+                            exchange.sendResponseHeaders(204, -1);
+                            exchange.close();
+                            return;
+                        }
                         int expected = body.getInt("expectedEntries");
                         long count = rows.keySet().stream().filter(key -> key.startsWith(id + ":")).count();
                         if (count == expected) {
@@ -255,8 +563,12 @@ public class HeliosDeliveryTest {
         }
 
         HeliosConfig config(String execution) {
+            return config(execution, "machine", "user");
+        }
+
+        HeliosConfig config(String execution, String machine, String user) {
             return new HeliosConfig("http://127.0.0.1:" + server.getAddress().getPort(), "test-key",
-                    execution, "bot", "", "", "machine", "user", null);
+                    execution, "bot", "", "", machine, user, null);
         }
 
         @Override public void close() { server.stop(0); }

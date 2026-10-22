@@ -85,11 +85,11 @@ public class VideoRecordingIntegrationTest {
 
         // INFO message: no video, just a normal log entry
         logMessage.action(logger, LEVEL_INFO, "info before failure",
-                false, DO_NOT_LOG_VARIABLE, null, null);
+                false, DO_NOT_LOG_VARIABLE, null);
 
         // ERROR message: triggers poster + async stage-2 encode
         logMessage.action(logger, LEVEL_ERROR, "the actual failure",
-                false, DO_NOT_LOG_VARIABLE, null, null);
+                false, DO_NOT_LOG_VARIABLE, null);
 
         // Stop the logger. close() blocks until the encoder pool drains
         // (typically ~5-15 s with libaom-av1) and the session folder is
@@ -152,7 +152,7 @@ public class VideoRecordingIntegrationTest {
                 java.time.Duration.ofSeconds(10));
 
         logMessage.action(logger, LEVEL_ERROR, "fast-mode failure",
-                false, DO_NOT_LOG_VARIABLE, null, null);
+                false, DO_NOT_LOG_VARIABLE, null);
 
         stopSession.stop(logger);
 
@@ -181,7 +181,7 @@ public class VideoRecordingIntegrationTest {
         // No need to wait for the buffer here - INFO is not in recordingLevels,
         // so snapshotForError will not be invoked and the encoder is never engaged.
         logMessage.action(logger, LEVEL_INFO, "info, no recording",
-                false, DO_NOT_LOG_VARIABLE, null, null);
+                false, DO_NOT_LOG_VARIABLE, null);
 
         stopSession.stop(logger);
 

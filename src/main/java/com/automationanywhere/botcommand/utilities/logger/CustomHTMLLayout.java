@@ -15,19 +15,28 @@ import java.io.InputStream;
 import java.net.InetAddress;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.Base64;
 import java.util.Map;
+import java.util.Locale;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * @author Sumit Kumar
  */
 @Plugin(name = "CustomHTMLLayout", category = Node.CATEGORY, elementType = Layout.ELEMENT_TYPE, printObject = true)
 public class CustomHTMLLayout extends AbstractStringLayout {
-    static final String FORMAT_MARKER = "<!-- a360-log-format:3 -->";
+    static final String FORMAT_MARKER = "<!-- a360-log-format:6 -->";
+    static final String IDENTITY_MARKER;
     static final String HEADER_END = "<!-- a360-log-header:end -->\n";
     static final String ENTRY_END = "<!-- a360-log-entry:end -->\n";
     private static final String templatePath = "/templates/log.html";
@@ -37,22 +46,34 @@ public class CustomHTMLLayout extends AbstractStringLayout {
 
     static {
         try (InputStream template = Objects.requireNonNull(CustomHTMLLayout.class.getResourceAsStream(templatePath))) {
-            // Normalize marker newlines and omit static-template indentation to reduce file size.
-            header = new String(template.readAllBytes(), StandardCharsets.UTF_8)
-                    .replace("\r\n", "\n").replaceAll("(?m)^ +", "").getBytes(StandardCharsets.UTF_8);
             machine = InetAddress.getLocalHost().getHostName();
             user = System.getProperty("user.name");
-        } catch (IOException e) {
+            IDENTITY_MARKER = "<!-- a360-log-identity:" + Base64.getUrlEncoder().withoutPadding().encodeToString(
+                    MessageDigest.getInstance("SHA-256").digest((machine + "\0" + user).getBytes(StandardCharsets.UTF_8))) + " -->";
+            // The packaged resource is minified at build time. Replace placeholders in one pass.
+            String html = new String(template.readAllBytes(), StandardCharsets.UTF_8)
+                    .replace("{{identity}}", IDENTITY_MARKER);
+            header = Pattern.compile("\\{\\{(machine|user)\\}\\}").matcher(html).replaceAll(match ->
+                    Matcher.quoteReplacement(StringEscapeUtils.escapeHtml4(
+                            String.valueOf(match.group(1).equals("machine") ? machine : user)))).getBytes(StandardCharsets.UTF_8);
+        } catch (IOException | NoSuchAlgorithmException e) {
             throw new RuntimeException(e);
         }
     }
 
     private static final DateTimeFormatter dateFormat = DateTimeFormatter
-            .ofPattern("yyyy-MMM-dd HH:mm:ss Z")
+            .ofPattern("yyyy-MMM-dd HH:mm:ss Z", Locale.ENGLISH)
             .withZone(ZoneId.systemDefault());
 
+    private final Path htmlDirectory;
+
     public CustomHTMLLayout(Charset charset) {
+        this(charset, null);
+    }
+
+    private CustomHTMLLayout(Charset charset, String htmlDirectory) {
         super(charset);
+        this.htmlDirectory = htmlDirectory == null ? null : Paths.get(htmlDirectory);
     }
 
     @PluginBuilderFactory
@@ -68,12 +89,12 @@ public class CustomHTMLLayout extends AbstractStringLayout {
         return dateFormat.format(Instant.ofEpochMilli(epochMilli));
     }
 
-    /** Host name shown in the Machine column. */
+    /** Host name shown in the session header. */
     public static String machineName() {
         return machine;
     }
 
-    /** Account name shown in the User column. */
+    /** Account name shown in the session header. */
     public static String userName() {
         return user;
     }
@@ -106,7 +127,7 @@ public class CustomHTMLLayout extends AbstractStringLayout {
 
             // Render the renamed "Screen" column cell. Video takes priority when present;
             // otherwise the existing screenshot path is used.
-            screenCell = HTMLGenerator.getScreenCellHTML(screenshotPath, videoPath, videoPosterPath);
+            screenCell = HTMLGenerator.getScreenCellHTML(screenshotPath, videoPath, videoPosterPath, htmlDirectory);
         } else {
             message = event.getMessage().getFormattedMessage();
         }
@@ -116,14 +137,11 @@ public class CustomHTMLLayout extends AbstractStringLayout {
 
         formattedContent = String.format(
                 "<tr class='log-entry %s'>"
-                        + "<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
-                        + "<td class='message-cell'>%s</td><td>%s</td><td>%s</td></tr>\n" + ENTRY_END,
+                        + "<td>%s<td>%s<td>%s<td>%s<td>%s<td>%s</tr>\n" + ENTRY_END,
                 StringEscapeUtils.escapeHtml4(levelClass),
                 StringEscapeUtils.escapeHtml4(formatTimestamp(event.getTimeMillis())),
                 StringEscapeUtils.escapeHtml4(event.getLevel().toString()),
                 StringEscapeUtils.escapeHtml4(sourceBotPath),
-                StringEscapeUtils.escapeHtml4(machine),
-                StringEscapeUtils.escapeHtml4(user),
                 HTMLGenerator.escapeWithWhitespaceMarkers(message),
                 variablesHTML,
                 screenCell
@@ -153,6 +171,9 @@ public class CustomHTMLLayout extends AbstractStringLayout {
         @PluginBuilderAttribute
         private Charset charset;
 
+        @PluginBuilderAttribute
+        private String htmlDirectory;
+
         private Builder() {
         }
 
@@ -161,9 +182,14 @@ public class CustomHTMLLayout extends AbstractStringLayout {
             return this;
         }
 
+        public Builder withHtmlDirectory(String htmlDirectory) {
+            this.htmlDirectory = htmlDirectory;
+            return this;
+        }
+
         @Override
         public CustomHTMLLayout build() {
-            return new CustomHTMLLayout(charset);
+            return new CustomHTMLLayout(charset, htmlDirectory);
         }
     }
 
