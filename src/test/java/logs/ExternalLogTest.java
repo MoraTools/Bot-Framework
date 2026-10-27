@@ -1,32 +1,36 @@
 package logs;
 
+import com.automationanywhere.botcommand.data.impl.StringValue;
 import com.automationanywhere.botcommand.utilities.helios.HeliosConfig;
 import com.automationanywhere.botcommand.utilities.helios.HeliosJsonLayout;
+import com.automationanywhere.botcommand.utilities.helios.HeliosStubServer;
 import com.automationanywhere.botcommand.utilities.logger.CustomHTMLLayout;
 import com.automationanywhere.botcommand.utilities.logger.CustomLogger;
 import com.automationanywhere.botcommand.utilities.logger.HTMLGenerator;
 import com.automationanywhere.botcommand.utilities.screen.recorder.CaptureResult;
 import com.automationanywhere.botcommand.utilities.screen.recorder.EncodingMode;
-import com.sun.net.httpserver.HttpServer;
 import org.apache.commons.text.StringEscapeUtils;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.core.impl.Log4jLogEvent;
 import org.apache.logging.log4j.message.ObjectMessage;
-import org.json.JSONArray;
 import org.json.JSONObject;
 import org.testng.Assert;
 import org.testng.SkipException;
+import org.testng.annotations.AfterClass;
 import org.testng.annotations.Test;
 
 import javax.imageio.ImageIO;
+import support.TempDirectories;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
-import java.net.InetSocketAddress;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -36,18 +40,15 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.TreeSet;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+
+import static support.LogEntries.occurrences;
 
 /** Tests for {@code CustomLogger.logExternal}, the entry point for other packages. */
 public class ExternalLogTest {
@@ -59,19 +60,26 @@ public class ExternalLogTest {
     private static final Pattern ATTACHMENT_LINK =
             Pattern.compile("<div><a href='([^']*)' target='_blank' rel='noopener'>(.*?)</a></div>");
 
-    private static Path png(Path file) throws IOException {
+    private final TempDirectories directories = new TempDirectories();
+
+    @AfterClass(alwaysRun = true)
+    public void deleteDirectories() {
+        directories.deleteAll();
+    }
+
+    static Path png(Path file) throws IOException {
         Files.createDirectories(file.getParent());
         Assert.assertTrue(ImageIO.write(new BufferedImage(2, 2, BufferedImage.TYPE_INT_RGB), "png", file.toFile()));
         return file;
     }
 
-    private static Path text(Path file, String content) throws IOException {
+    static Path text(Path file, String content) throws IOException {
         Files.createDirectories(file.getParent());
         return Files.writeString(file, content, StandardCharsets.UTF_8);
     }
 
     /** The entries of one log file, without the header and the entry end marker. */
-    private static List<String> rows(Path log) throws IOException {
+    static List<String> rows(Path log) throws IOException {
         String html = Files.readString(log, StandardCharsets.UTF_8);
         String entries = html.substring(html.indexOf(HEADER_END) + HEADER_END.length());
         List<String> rows = new ArrayList<>();
@@ -84,30 +92,18 @@ public class ExternalLogTest {
         return row.replaceFirst("(<tr[^>]*><td>)[^<]*", "$1T");
     }
 
-    /** The row that an ordinary entry with only a message and a source produces. */
-    private static String plainRow(Level level, String message, String source) {
-        Map<String, Object> data = new HashMap<>();
-        data.put(CustomHTMLLayout.Columns.MESSAGE, message);
-        data.put(CustomHTMLLayout.Columns.SOURCE, source);
-        return withoutTimestamp(new CustomHTMLLayout(StandardCharsets.UTF_8).toSerializable(Log4jLogEvent.newBuilder()
-                .setTimeMillis(0).setLevel(level).setMessage(new ObjectMessage(data)).build()));
-    }
-
     private static Path resolveLink(Path logDirectory, String htmlHref) throws Exception {
         return logDirectory.resolve(new URI(StringEscapeUtils.unescapeHtml4(htmlHref)).getPath()).normalize();
     }
 
-    private static Map<String, Object> ordinaryEntry(String message) {
+    /** An entry as the Log Message action writes it when it has only a message and a source. */
+    private static Map<String, Object> ordinaryEntry(String message, String source) {
         Map<String, Object> row = new HashMap<>();
         row.put(CustomHTMLLayout.Columns.MESSAGE, message);
-        row.put(CustomHTMLLayout.Columns.SOURCE, "ordinary");
+        row.put(CustomHTMLLayout.Columns.SOURCE, source);
         row.put(CustomHTMLLayout.Columns.SCREENSHOT, "");
         row.put(CustomHTMLLayout.Columns.VARIABLES, null);
         return row;
-    }
-
-    private static int count(String text, String part) {
-        return text.split(Pattern.quote(part), -1).length - 1;
     }
 
     private static List<String> names(Path directory) throws IOException {
@@ -128,7 +124,7 @@ public class ExternalLogTest {
 
     @Test
     public void everyLevelIsWrittenInAnyLetterCase() throws Exception {
-        Path log = Files.createTempDirectory("external-levels").resolve("log.html");
+        Path log = directories.create("external-levels").resolve("log.html");
         CustomLogger logger = new CustomLogger("external-levels", log.toString(), 100);
         try {
             for (String level : List.of("INFO", "info", "Warn", "WARN", "error", "eRRoR")) {
@@ -145,7 +141,7 @@ public class ExternalLogTest {
 
     @Test
     public void invalidLevelsAndNullMessageAreRejectedBeforeAnythingIsWritten() throws Exception {
-        Path log = Files.createTempDirectory("external-invalid").resolve("log.html");
+        Path log = directories.create("external-invalid").resolve("log.html");
         CustomLogger logger = new CustomLogger("external-invalid", log.toString(), 100);
         try {
             for (String level : new String[] {null, "", " INFO", "INFO ", "DEBUG", "TRACE", "FATAL", "ALL"}) {
@@ -161,29 +157,34 @@ public class ExternalLogTest {
 
     @Test
     public void messageAndSourceRenderLikeAnOrdinaryEntryAndOptionalInputsMayBeEmpty() throws Exception {
-        Path log = Files.createTempDirectory("external-text").resolve("log.html");
+        Path log = directories.create("external-text").resolve("log.html");
         String hostile = "</td><td><script>alert(1)</script> & \" 日本語\n\ttrail  \n";
+        String hostileSource = "PUBLIC:/tasks/<b>x</b> & 日本語";
         CustomLogger logger = new CustomLogger("external-text", log.toString(), 100);
         try {
-            logger.logExternal("INFO", hostile, "PUBLIC:/tasks/<b>x</b> & 日本語", null, null);
+            // Each external entry is followed by the ordinary entry that must look the same.
+            logger.logExternal("INFO", hostile, hostileSource, null, null);
+            logger.getLogger().info(ordinaryEntry(hostile, hostileSource));
             logger.logExternal("WARN", "", "", "", "");
+            logger.getLogger().warn(ordinaryEntry("", ""));
             logger.logExternal("ERROR", "no source", null, null, "");
+            logger.getLogger().error(ordinaryEntry("no source", ""));
             logger.logExternal("INFO", "   ", "kept", "", null);
+            logger.getLogger().info(ordinaryEntry("   ", "kept"));
         } finally { logger.close(); }
         List<String> rows = rows(log);
-        Assert.assertEquals(rows.size(), 4);
-        Assert.assertEquals(withoutTimestamp(rows.get(0)), plainRow(Level.INFO, hostile, "PUBLIC:/tasks/<b>x</b> & 日本語"));
-        Assert.assertEquals(withoutTimestamp(rows.get(1)), plainRow(Level.WARN, "", ""));
-        Assert.assertEquals(withoutTimestamp(rows.get(2)), plainRow(Level.ERROR, "no source", ""));
-        Assert.assertEquals(withoutTimestamp(rows.get(3)), plainRow(Level.INFO, "   ", "kept"));
+        Assert.assertEquals(rows.size(), 8);
+        for (int pair = 0; pair < rows.size(); pair += 2) {
+            Assert.assertEquals(withoutTimestamp(rows.get(pair)), withoutTimestamp(rows.get(pair + 1)));
+        }
         Assert.assertFalse(rows.get(0).contains("<script"));
         Assert.assertTrue(rows.get(0).contains(HTMLGenerator.escapeWithWhitespaceMarkers(hostile)));
-        for (String row : rows) Assert.assertEquals(count(row, "<td>"), 6, row);
+        for (String row : rows) Assert.assertEquals(occurrences(row, "<td>"), 6, row);
     }
 
     @Test
     public void linksInsideTheLogFolderStayRelative() throws Exception {
-        Path root = Files.createTempDirectory("external-inside");
+        Path root = directories.create("external-inside");
         Path log = root.resolve("logs/log.html");
         Path shot = png(root.resolve("logs/screenshots/shot.png"));
         Path attachment = text(root.resolve("logs/attachments/report 1.txt"), "report");
@@ -197,7 +198,7 @@ public class ExternalLogTest {
 
     @Test
     public void linksOutsideTheLogFolderQuoteSpecialCharactersAndLeaveSuppliedFilesUnchanged() throws Exception {
-        Path root = Files.createTempDirectory("external-outside");
+        Path root = directories.create("external-outside");
         Path log = root.resolve("logs/log.html");
         Path shot = png(root.resolve("ext dir/shot ' & # (1) 日本語.png"));
         Path attachment = text(root.resolve("ext dir/report ' & # (1).txt"), "attachment bytes");
@@ -209,7 +210,7 @@ public class ExternalLogTest {
         finally { logger.close(); }
         String row = rows(log).get(0);
         Assert.assertTrue(row.contains("<div><a href='../ext%20dir/report%20%27%20&amp;%20%23%20%281%29.txt' "
-                + "target='_blank' rel='noopener'>report ' &amp; # (1).txt</a></div>"), row);
+                + "target='_blank' rel='noopener'>report &#39; &amp; # (1).txt</a></div>"), row);
         Matcher screenshotLink = SCREENSHOT_LINK.matcher(row);
         Assert.assertTrue(screenshotLink.find(), row);
         Assert.assertTrue(screenshotLink.group(1).startsWith("../ext%20dir/shot%20%27%20&amp;%20%23%20%281%29%20"), screenshotLink.group(1));
@@ -227,7 +228,7 @@ public class ExternalLogTest {
 
     @Test
     public void hostileFileNameAndMessageNeverBecomeMarkup() throws Exception {
-        Path root = Files.createTempDirectory("external-hostile");
+        Path root = directories.create("external-hostile");
         Path log = root.resolve("logs/log.html");
         String name = WINDOWS ? "report ' & #.txt" : "<script>alert('x')\"q\".txt";
         Path attachment = text(root.resolve("ext/" + name), "attachment");
@@ -237,68 +238,98 @@ public class ExternalLogTest {
         finally { logger.close(); }
         String row = rows(log).get(0);
         Assert.assertFalse(row.contains("<script"), row);
-        Assert.assertEquals(count(row, "<a "), 1, "only the attachment is a link");
-        Assert.assertEquals(count(row, "<td>"), 6);
-        Assert.assertTrue(row.contains(HTMLGenerator.escapeWithWhitespaceMarkers(message) + "<div><a href='"), row);
+        Assert.assertEquals(occurrences(row, "<a "), 1, "only the attachment is a link");
+        Assert.assertEquals(occurrences(row, "<td>"), 6);
+        Assert.assertTrue(row.contains("<div class='message'>" + HTMLGenerator.escapeWithWhitespaceMarkers(message) + "</div><div><a href='"), row);
         Matcher link = ATTACHMENT_LINK.matcher(row);
         Assert.assertTrue(link.find(), row);
-        Assert.assertEquals(link.group(2), StringEscapeUtils.escapeHtml4(name));
+        Assert.assertEquals(link.group(2), WINDOWS ? "report &#39; &amp; #.txt" : "&lt;script&gt;alert(&#39;x&#39;)&quot;q&quot;.txt");
         Assert.assertEquals(StringEscapeUtils.unescapeHtml4(link.group(2)), name);
         Assert.assertFalse(link.group(1).contains("'") || link.group(1).contains("\"") || link.group(1).contains("<"));
         Assert.assertEquals(resolveLink(log.getParent(), link.group(1)), attachment);
-        // The viewer script only handles [data-vars] and .img-link, so a plain anchor keeps its native click.
-        Assert.assertFalse(link.group(0).contains("img-link") || link.group(0).contains("data-vars"));
+        // The viewer script only handles [data-vars], .img-link and .more, so a plain anchor keeps its native click.
+        // The row has no screenshot and no variables: any of these two names in it would come from the attachment.
+        Assert.assertFalse(row.contains("img-link") || row.contains("data-vars"), row);
+    }
+
+    @Test
+    public void namesKeepNonAsciiCharactersAndEscapeTheApostrophe() throws Exception {
+        Path root = directories.create("external-utf8-names");
+        Path log = root.resolve("logs/log.html");
+        Path attachment = text(root.resolve("ext/Zo\u00eb's file.txt"), "attachment");
+        Map<String, Object> entry = ordinaryEntry("variables", "Zo\u00eb's bot");
+        entry.put(CustomHTMLLayout.Columns.VARIABLES, Map.of("Zo\u00eb's file", new StringValue("value")));
+        CustomLogger logger = new CustomLogger("external-utf8-names", log.toString(), 100);
+        try {
+            logger.getLogger().info(entry);
+            logger.logExternal("INFO", "attachment", "source", null, attachment.toString());
+        } finally { logger.close(); }
+        String html = CompressedSnapshots.expand(Files.readString(log, StandardCharsets.UTF_8));
+        Assert.assertTrue(html.contains("<td>Zo\u00eb&#39;s bot<td>"), html);
+        Assert.assertTrue(html.contains("<div class='variable-name'>Zo\u00eb&#39;s file</div>"), html);
+        Assert.assertTrue(html.contains("rel='noopener'>Zo\u00eb&#39;s file.txt</a></div>"), html);
+        Assert.assertFalse(Pattern.compile("&(?!amp;|lt;|gt;|quot;)[A-Za-z][A-Za-z0-9]*;").matcher(html).find(),
+                "no named entity: " + html);
     }
 
     @Test
     public void aNameWithAColonBeforeTheFirstSlashCannotBecomeAUriScheme() throws Exception {
         if (WINDOWS) throw new SkipException("A colon cannot be part of a Windows file name");
-        Path logDirectory = Files.createTempDirectory("external-colon");
+        Path logDirectory = directories.create("external-colon");
         Path log = logDirectory.resolve("log.html");
-        Path attachment = text(logDirectory.resolve("javascript:alert(1).txt"), "attachment");
+        // The first two names are legal schemes; the others are not (a digit first, a space and a percent sign).
+        String[] names = {"javascript:alert(1).txt", "1:x.txt", "12:30.txt", "Invoice 42: final.pdf"};
+        String[] hrefs = {"./javascript:alert%281%29.txt", "./1:x.txt", "./12:30.txt", "./Invoice%2042:%20final.pdf"};
         Path shot = png(logDirectory.resolve("data:x.png"));
         CustomLogger logger = new CustomLogger("external-colon", log.toString(), 100);
-        try { logger.logExternal("INFO", "colon", "source", shot.toString(), attachment.toString()); }
-        finally { logger.close(); }
-        String row = rows(log).get(0);
-        Assert.assertTrue(row.contains("<div><a href='./javascript:alert%281%29.txt' "), row);
-        Assert.assertTrue(row.contains("<a href='./data:x.png' target='_blank' class='img-link'"), row);
-        Assert.assertFalse(row.contains("href='javascript:") || row.contains("href='data:"), row);
-        Assert.assertEquals(resolveLink(logDirectory, "./javascript:alert%281%29.txt"), attachment);
+        try {
+            for (String name : names) {
+                logger.logExternal("INFO", name, "source", shot.toString(), text(logDirectory.resolve(name), "attachment").toString());
+            }
+        } finally { logger.close(); }
+        List<String> rows = rows(log);
+        Assert.assertEquals(rows.size(), names.length, "a name that is not a legal scheme must not lose its entry");
+        for (int index = 0; index < names.length; index++) {
+            String row = rows.get(index);
+            Assert.assertTrue(row.contains("<div><a href='" + hrefs[index] + "' "), row);
+            Assert.assertTrue(row.contains("<a href='./data:x.png' target='_blank' class='img-link'"), row);
+            Assert.assertFalse(row.contains("href='" + names[index].substring(0, names[index].indexOf(':'))), row);
+            Assert.assertFalse(row.contains("href='data:"), row);
+            Assert.assertEquals(resolveLink(logDirectory, hrefs[index]), logDirectory.resolve(names[index]));
+        }
     }
 
     @Test
-    public void differentRootUsesFileUrisWhenAnotherRootIsWritable() throws Exception {
-        Path logDirectory = Files.createTempDirectory("external-root");
-        Path logRoot = logDirectory.toAbsolutePath().getRoot();
-        Path otherDirectory = null;
-        for (Path root : FileSystems.getDefault().getRootDirectories()) {
-            if (root.equals(logRoot)) continue;
-            try { otherDirectory = Files.createTempDirectory(root, "external-root"); break; }
-            catch (IOException | SecurityException unavailable) { /* try the next root */ }
-        }
-        if (otherDirectory == null) throw new SkipException("This host has no second writable file system root");
-        Path shot = png(otherDirectory.resolve("shot ' #.png"));
-        Path attachment = text(otherDirectory.resolve("report ' #.txt"), "attachment");
-        try {
-            Path log = logDirectory.resolve("log.html");
-            CustomLogger logger = new CustomLogger("external-root", log.toString(), 100);
-            try { logger.logExternal("INFO", "other root", "source", shot.toString(), attachment.toString()); }
-            finally { logger.close(); }
-            String row = rows(log).get(0);
-            String expectedAttachment = attachment.toUri().toASCIIString().replace("'", "%27");
-            Assert.assertTrue(row.contains("<div><a href='" + StringEscapeUtils.escapeHtml4(expectedAttachment) + "'"), row);
-            Assert.assertTrue(row.contains("<a href='" + shot.toUri().toASCIIString().replace("'", "%27") + "'"), row);
-        } finally {
-            Files.deleteIfExists(shot);
-            Files.deleteIfExists(attachment);
-            Files.deleteIfExists(otherDirectory);
-        }
+    public void aFileNameKeepsItsUnicodeFormInTheHref() throws Exception {
+        // The same letter in two forms: a precomposed e-acute and an e followed by a combining accent.
+        // They are two different files on most file systems, so each link must keep its own bytes.
+        Path dir = directories.create("external-unicode");
+        Path composed = dir.resolve("\u00e9.txt"), decomposed = dir.resolve("e\u0301.txt");
+        Assert.assertTrue(HTMLGenerator.getAttachmentHTML(composed.toString(), dir).contains("<a href='%C3%A9.txt' "));
+        Assert.assertTrue(HTMLGenerator.getAttachmentHTML(decomposed.toString(), dir).contains("<a href='e%CC%81.txt' "));
+        // Through a real log entry: the written file name and the link name are the same bytes.
+        Path log = dir.resolve("log.html");
+        Path attachment = text(decomposed, "attachment");
+        CustomLogger logger = new CustomLogger("external-unicode", log.toString(), 100);
+        try { logger.logExternal("INFO", "decomposed", "source", null, attachment.toString()); }
+        finally { logger.close(); }
+        String row = rows(log).get(0);
+        Assert.assertTrue(row.contains("<div><a href='e%CC%81.txt' "), row);
+        Assert.assertEquals(resolveLink(dir, "e%CC%81.txt"), attachment);
+    }
+
+    @Test
+    public void anAttachmentOnAnotherDriveBecomesAFileUri() {
+        if (!WINDOWS) throw new SkipException("Drive letters exist only on Windows");
+        // getAttachmentHTML does no file I/O, so the drives do not have to exist.
+        String html = HTMLGenerator.getAttachmentHTML("Z:\\ext dir\\report ' #.txt", Path.of("C:\\logs"));
+        Assert.assertTrue(html.startsWith("<div><a href='file:///Z:/ext%20dir/report%20%27%20%23.txt' "), html);
+        Assert.assertTrue(html.endsWith(">report &#39; #.txt</a></div>"), html);
     }
 
     @Test
     public void invalidPathsAreRejectedWithoutWritingOrChangingFiles() throws Exception {
-        Path root = Files.createTempDirectory("external-paths");
+        Path root = directories.create("external-paths");
         Path log = root.resolve("logs/log.html");
         Path shot = png(root.resolve("ext/shot.png"));
         Path notImage = text(root.resolve("ext/notes.png"), "this text is not an image");
@@ -331,7 +362,7 @@ public class ExternalLogTest {
 
     @Test
     public void closedSessionThrowsTheExactException() throws Exception {
-        Path root = Files.createTempDirectory("external-closed");
+        Path root = directories.create("external-closed");
         Path log = root.resolve("log.html");
         CustomLogger logger = new CustomLogger("external-closed", log.toString(), 100);
         logger.logExternal("INFO", "before close", "source", null, null);
@@ -344,77 +375,193 @@ public class ExternalLogTest {
     }
 
     @Test
-    public void externalEntriesNeverUseCaptureRecordingOrSnapshotApis() throws Exception {
-        Path root = Files.createTempDirectory("external-no-capture");
-        Path log = root.resolve("logs/log.html");
+    public void splitLogsReceiveEachExternalLevelInTheirOwnFileWithLinksRelativeToIt() throws Exception {
+        Path root = directories.create("external-split");
+        Map<Level, String> outputs = Map.of(Level.INFO, root.resolve("info/log.html").toString(),
+                Level.WARN, root.resolve("warn/log.html").toString(),
+                Level.ERROR, root.resolve("error/log.html").toString());
         Path shot = png(root.resolve("ext/shot.png"));
-        Path attachment = text(root.resolve("ext/file.txt"), "attachment");
-        FailFastLogger logger = new FailFastLogger("external-no-capture", log.toString());
+        Path attachment = text(root.resolve("ext/report.txt"), "attachment");
+        CustomLogger logger = new CustomLogger("external-split", outputs, 100);
         try {
-            for (String level : new String[] {"INFO", "WARN", "ERROR"}) {
-                logger.logExternal(level, level + " entry", "source", shot.toString(), attachment.toString());
-            }
-            Assert.assertEquals(rows(log).size(), 3);
+            logger.logExternal("INFO", "info entry", "source", shot.toString(), attachment.toString());
+            logger.logExternal("warn", "warn entry", "source", null, attachment.toString());
+            logger.logExternal("ERROR", "error entry", "source", shot.toString(), null);
+            logger.logExternal("INFO", "second info entry", "source", null, null);
         } finally { logger.close(); }
-        Assert.assertEquals(logger.forbiddenCalls.size(), 0, logger.forbiddenCalls.toString());
+        List<String> info = rows(Path.of(outputs.get(Level.INFO)));
+        List<String> warn = rows(Path.of(outputs.get(Level.WARN)));
+        List<String> error = rows(Path.of(outputs.get(Level.ERROR)));
+        Assert.assertEquals(info.size(), 2);
+        Assert.assertEquals(warn.size(), 1);
+        Assert.assertEquals(error.size(), 1);
+        Assert.assertTrue(info.get(0).contains("info entry") && info.get(1).contains("second info entry"));
+        Assert.assertTrue(warn.get(0).startsWith("<tr class='log-entry level-WARN'>") && warn.get(0).contains("warn entry"));
+        Assert.assertTrue(error.get(0).startsWith("<tr class='log-entry level-ERROR'>") && error.get(0).contains("error entry"));
+        // Each file links relative to its own folder, not to the first file's folder.
+        Assert.assertTrue(info.get(0).contains("<a href='../ext/shot.png' target='_blank' class='img-link'"), info.get(0));
+        Assert.assertTrue(info.get(0).contains("<div><a href='../ext/report.txt' "), info.get(0));
+        Assert.assertTrue(warn.get(0).contains("<div><a href='../ext/report.txt' "), warn.get(0));
+        Assert.assertTrue(error.get(0).contains("<a href='../ext/shot.png' target='_blank' class='img-link'"), error.get(0));
         for (Level level : List.of(Level.INFO, Level.WARN, Level.ERROR)) {
-            Path screenshots = Path.of(logger.getScreenshotFolderPath(level));
-            if (Files.isDirectory(screenshots)) Assert.assertEquals(names(screenshots), List.of(), "no still was captured");
+            String other = Files.readString(Path.of(outputs.get(level)));
+            for (String message : List.of("info entry", "warn entry", "error entry")) {
+                Assert.assertEquals(other.contains(message), message.startsWith(level.name().toLowerCase()), level + " " + message);
+            }
         }
-        Assert.assertFalse(Files.exists(root.resolve("logs/clips")));
     }
 
     @Test
-    public void heliosGetsLevelMessageAndSourceButNoMediaOrSuppliedPaths() throws Exception {
-        Path root = Files.createTempDirectory("external-helios");
-        Path outbox = Files.createDirectories(root.resolve("outbox"));
-        Path shot = png(root.resolve("secret-ext/secret-shot-name.png"));
-        Path attachment = text(root.resolve("secret-ext/secret-attachment-name.txt"), "SECRET-ATTACHMENT-BYTES");
-        byte[] shotBytes = Files.readAllBytes(shot);
+    public void closeWaitingForHeliosDoesNotBlockLoggingCallsOnOtherThreads() throws Exception {
+        Path root = directories.create("external-close-race");
+        Path log = root.resolve("log.html");
         String previous = System.getProperty("helios.outbox.directory");
-        System.setProperty("helios.outbox.directory", outbox.toString());
-        try (Server server = new Server()) {
-            Path log = root.resolve("logs/log.html");
-            CustomLogger logger = new CustomLogger("external-helios", log.toString(), 100, 0, new HashSet<>(),
-                    EncodingMode.FAST, server.config());
+        System.setProperty("helios.outbox.directory", Files.createDirectories(root.resolve("outbox")).toString());
+        List<Socket> accepted = new CopyOnWriteArrayList<>();
+        try (ServerSocket silent = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+            // A server that takes every connection and never answers: close() has to wait for Helios.
+            Thread acceptor = new Thread(() -> {
+                try { while (true) accepted.add(silent.accept()); }
+                catch (IOException closed) { /* the test is over */ }
+            }, "silent-helios");
+            acceptor.setDaemon(true);
+            acceptor.start();
+            HeliosConfig config = new HeliosConfig("http://127.0.0.1:" + silent.getLocalPort(), "test-key", "external-aa",
+                    "bot", "master", "file", "machine", "user", null);
+            CustomLogger logger = new CustomLogger("external-close-race", log.toString(), 100, 0, new HashSet<>(),
+                    EncodingMode.FAST, config);
+            Thread closer = new Thread(logger::close, "closer");
             try {
-                logger.logExternal("INFO", "streamed info", "PUBLIC:/Bots/tasks/Ext@v1#L1", shot.toString(), attachment.toString());
-                logger.logExternal("warn", "streamed warn", "", shot.toString(), null);
-                logger.logExternal("ERROR", "streamed error ' & <b>", null, null, attachment.toString());
-            } finally { logger.close(); }
-            Assert.assertEquals(server.rows.size(), 3, server.requests.toString());
-            String[][] expected = {{"INFO", "streamed info", "PUBLIC:/Bots/tasks/Ext@v1#L1"},
-                    {"WARN", "streamed warn", ""}, {"ERROR", "streamed error ' & <b>", ""}};
-            for (int index = 0; index < 3; index++) {
-                JSONObject entry = server.rows.get(index);
-                Assert.assertEquals(entry.getString("level"), expected[index][0]);
-                Assert.assertEquals(entry.getString("message"), expected[index][1]);
-                Assert.assertEquals(entry.getString("source"), expected[index][2]);
-                Assert.assertEquals(entry.getString("screenPath"), "");
-                Assert.assertEquals(entry.getInt("variablesCount"), 0);
-                Assert.assertFalse(entry.has("media"), "no ERROR media is requested for an external entry");
-            }
-            for (String request : server.requests) {
-                Assert.assertFalse(request.contains("secret-"), request);
-                Assert.assertFalse(request.contains("SECRET-ATTACHMENT-BYTES"), request);
-                Assert.assertFalse(request.contains(root.toString()), request);
-                Assert.assertFalse(request.contains("/media"), request);
-            }
-            try (Stream<Path> files = Files.walk(outbox)) {
-                for (Path file : files.filter(Files::isRegularFile).collect(Collectors.toList())) {
-                    String stored = new String(Files.readAllBytes(file), StandardCharsets.ISO_8859_1);
-                    Assert.assertFalse(stored.contains("secret-"), file.toString());
-                    Assert.assertFalse(stored.contains("SECRET-ATTACHMENT-BYTES"), file.toString());
+                closer.start();
+                // close() sets its closed flag first and then waits for the Helios sender (Thread.join with a limit).
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+                while (closer.getState() != Thread.State.TIMED_WAITING) {
+                    Assert.assertTrue(closer.isAlive() && System.nanoTime() < deadline, "close() never started to wait for Helios");
+                    Thread.sleep(10);
                 }
+                long start = System.nanoTime();
+                Assert.assertNotNull(logger.getLogger());
+                IllegalStateException refused = Assert.expectThrows(IllegalStateException.class,
+                        () -> logger.logExternal("INFO", "late entry", "source", null, null));
+                long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+                Assert.assertEquals(refused.getMessage(), "Logger session is closed");
+                Assert.assertTrue(closer.isAlive(), "close() was still waiting while these calls ran");
+                // close() waits about 5 s for the sender. A call that waited for close() would take about that long.
+                Assert.assertTrue(elapsedMillis < 2500, "the calls waited " + elapsedMillis + " ms for close()");
+            } finally {
+                closer.join(TimeUnit.SECONDS.toMillis(60));
+                for (Socket socket : accepted) socket.close();
             }
-            // The local HTML log still shows the supplied files.
-            String html = Files.readString(log);
-            Assert.assertTrue(html.contains("secret-attachment-name.txt"));
-            Assert.assertTrue(html.contains("secret-shot-name.png"));
-            Assert.assertEquals(Files.readAllBytes(shot), shotBytes);
+            Assert.assertFalse(closer.isAlive(), "close() ended");
+            Assert.assertTrue(logger.isClosed());
         } finally {
             if (previous == null) System.clearProperty("helios.outbox.directory");
             else System.setProperty("helios.outbox.directory", previous);
+        }
+        Assert.assertFalse(Files.readString(log).contains("late entry"));
+    }
+
+    @Test
+    public void onlyExternalErrorEntriesCaptureAndAFailedStillDoesNotThrow() throws Exception {
+        Path root = directories.create("external-capture");
+        Path log = root.resolve("logs/log.html");
+        Path shot = png(root.resolve("ext/shot.png"));
+        Path attachment = text(root.resolve("ext/file.txt"), "attachment");
+        RecordingLogger logger = new RecordingLogger("external-capture", log.toString(), root.resolve("logs/clips/clip.mp4"));
+        try {
+            // A file in place of the screenshot folder makes every desktop still fail.
+            Path screenshots = Path.of(logger.getScreenshotFolderPath(Level.ERROR));
+            Files.delete(screenshots);
+            Files.writeString(screenshots, "not a folder");
+            for (String level : new String[] {"INFO", "WARN", "ERROR"}) {
+                logger.logExternal(level, level + " entry", "source", shot.toString(), attachment.toString());
+            }
+        } finally { logger.close(); }
+        Assert.assertEquals(logger.recorderCalls, List.of("shouldRecordVideoFor(ERROR)", "snapshotForError"),
+                "only the ERROR entry asks the recorder");
+        List<String> rows = rows(log);
+        Assert.assertEquals(rows.size(), 3);
+        for (String row : rows.subList(0, 2)) {
+            Assert.assertTrue(row.contains("<a href='../ext/shot.png' target='_blank' class='img-link'"), row);
+            Assert.assertFalse(row.contains("video-link") || row.contains("video-unavailable"), row);
+        }
+        // The clip wins over the supplied screenshot. The still failed, so the clip has no poster.
+        Assert.assertTrue(rows.get(2).contains("<a href='clips/clip.mp4' target='_blank' class='img-link video-link' "), rows.get(2));
+        Assert.assertFalse(rows.get(2).contains("shot.png"), rows.get(2));
+        Assert.assertTrue(rows.get(2).contains("<div><a href='../ext/file.txt' "), rows.get(2));
+    }
+
+    @Test
+    public void heliosGetsExternalWarnAndErrorButNotExternalInfoWithContiguousOrdinals() throws Exception {
+        try (HeliosStubServer server = HeliosStubServer.withMedia()) {
+            Path log = directories.create("external-helios").resolve("log.html");
+            CustomLogger logger = new CustomLogger("external-helios", log.toString(), 100, 0, new HashSet<>(),
+                    EncodingMode.FAST, server.config("external-helios"));
+            try {
+                logger.getLogger().info(ordinaryEntry("own info 1", "bot"));
+                logger.logExternal("INFO", "external info 1", "other", null, null);
+                logger.logExternal("WARN", "external warn", "other", null, null);
+                logger.getLogger().warn(ordinaryEntry("own warn", "bot"));
+                logger.logExternal("info", "external info 2", "other", null, null);
+                logger.logExternal("ERROR", "external error", "other", null, null);
+                logger.getLogger().info(ordinaryEntry("own info 2", "bot"));
+                logger.logExternal("INFO", "external info 3", "other", null, null);
+            } finally { logger.close(); }
+            Map<Integer, JSONObject> sent = server.rows(logger.getLoggerId());
+            Assert.assertEquals(new ArrayList<>(sent.keySet()), List.of(0, 1, 2, 3, 4));
+            Assert.assertEquals(sent.values().stream().map(row -> row.getString("message")).collect(Collectors.toList()),
+                    List.of("own info 1", "external warn", "own warn", "external error", "own info 2"));
+            Assert.assertEquals(sent.get(1).getString("source"), "other");
+            Assert.assertEquals(server.requests("/end").get(0).json().getInt("expectedEntries"), 5);
+            Assert.assertEquals(server.verified, List.of("external-helios"), "Helios confirmed every ordinal");
+            Assert.assertEquals(rows(log).size(), 8, "the HTML log keeps every entry");
+        }
+    }
+
+    @Test
+    public void externalErrorSendsAScreenshotDeclarationToHeliosAndWarnSendsNone() throws Exception {
+        try (HeliosStubServer server = HeliosStubServer.withMedia()) {
+            Path root = directories.create("external-error-media");
+            Path log = root.resolve("logs/log.html");
+            Path shot = png(root.resolve("ext/shot.png"));
+            CustomLogger logger = new CustomLogger("external-error-media", log.toString(), 100, 0, new HashSet<>(),
+                    EncodingMode.FAST, server.config("external-error-media"));
+            try {
+                logger.logExternal("WARN", "external warn", "other", shot.toString(), null);
+                logger.logExternal("ERROR", "external error", "other", shot.toString(), null);
+            } finally { logger.close(); }
+            Map<Integer, JSONObject> sent = server.rows(logger.getLoggerId());
+            Assert.assertEquals(sent.size(), 2);
+            Assert.assertFalse(sent.get(0).has("media"), "WARN never captures");
+            JSONObject error = sent.get(1);
+            Assert.assertEquals(error.getString("screenPath"), "");
+            Assert.assertEquals(error.getJSONArray("media").length(), 1);
+            Assert.assertEquals(error.getJSONArray("media").getJSONObject(0).getString("kind"), "screenshot");
+            Assert.assertTrue(rows(log).get(1).contains("<a href='../ext/shot.png' target='_blank' class='img-link'"));
+        }
+    }
+
+    @Test
+    public void externalErrorWithAFailedStillIsWrittenAndHeliosGetsTheFailureNotTheCallerFile() throws Exception {
+        try (HeliosStubServer server = HeliosStubServer.withMedia()) {
+            Path root = directories.create("external-error-failure");
+            Path log = root.resolve("logs/log.html");
+            Path shot = png(root.resolve("ext/shot.png"));
+            CustomLogger logger = new CustomLogger("external-error-failure", log.toString(), 100, 0, new HashSet<>(),
+                    EncodingMode.FAST, server.config("external-error-failure"));
+            try {
+                Path screenshots = Path.of(logger.getScreenshotFolderPath(Level.ERROR));
+                Files.delete(screenshots);
+                Files.writeString(screenshots, "not a folder");
+                logger.logExternal("ERROR", "external error", "other", shot.toString(), null);
+            } finally { logger.close(); }
+            // The caller's screenshot is never staged for Helios, so the failed still is all Helios hears of.
+            JSONObject media = server.rows(logger.getLoggerId()).get(0).getJSONArray("media").getJSONObject(0);
+            Assert.assertEquals(media.getString("kind"), "screenshot");
+            Assert.assertEquals(media.getString("state"), "unavailable");
+            Assert.assertEquals(media.getString("reason"), "captureFailed");
+            Assert.assertEquals(rows(log).size(), 1);
+            Assert.assertTrue(rows(log).get(0).contains("<a href='../ext/shot.png' target='_blank' class='img-link'"));
         }
     }
 
@@ -436,148 +583,42 @@ public class ExternalLogTest {
         Assert.assertFalse(external.toString().contains("report.txt"));
     }
 
-    @Test
-    public void existingFormat6LogIsAppendedWithoutMigrationAndOldEntriesRenderAsBefore() throws Exception {
-        Path root = Files.createTempDirectory("external-append");
-        Path log = root.resolve("log.html");
-        CustomLogger first = new CustomLogger("external-append-1", log.toString(), 100);
-        try {
-            first.getLogger().info(ordinaryEntry("old one"));
-            first.getLogger().error(ordinaryEntry("old two"));
-        } finally { first.close(); }
-        byte[] old = Files.readAllBytes(log);
-        Assert.assertTrue(new String(old, StandardCharsets.UTF_8).startsWith("<!DOCTYPE html>\n<!-- a360-log-format:6 -->\n"));
-        Path attachment = text(root.resolve("ext/new.txt"), "attachment");
-        CustomLogger second = new CustomLogger("external-append-2", log.toString(), 100);
-        try {
-            second.logExternal("WARN", "new external", "source", null, attachment.toString());
-            second.getLogger().info(ordinaryEntry("new ordinary"));
-        } finally { second.close(); }
-        byte[] now = Files.readAllBytes(log);
-        Assert.assertEquals(Arrays.copyOf(now, old.length), old, "existing bytes are not rewritten");
-        Assert.assertFalse(Files.exists(root.resolve("1_log.html")), "no migration archive");
-        String html = new String(now, StandardCharsets.UTF_8);
-        Assert.assertEquals(count(html, "<!-- a360-log-format:6 -->"), 1);
-        Assert.assertEquals(count(html, "<!-- a360-log-header:end -->"), 1);
-        List<String> rows = rows(log);
-        Assert.assertEquals(rows.size(), 4);
-        Assert.assertTrue(rows.get(2).contains("<div><a href='ext/new.txt'"), rows.get(2));
-        Assert.assertEquals(count(rows.get(3), "<a "), 0, "an ordinary entry has no attachment link");
-        Assert.assertTrue(html.endsWith(ENTRY_END));
-    }
-
-    @Test
-    public void concurrentExternalEntriesKeepEveryCompleteEntry() throws Exception {
-        int threads = 8, perThread = 50;
-        Path root = Files.createTempDirectory("external-concurrent");
-        Path log = root.resolve("log.html");
-        Path attachment = text(root.resolve("ext/shared.txt"), "attachment");
-        Path shot = png(root.resolve("ext/shot.png"));
-        CustomLogger logger = new CustomLogger("external-concurrent", log.toString(), 10_000);
-        ExecutorService pool = Executors.newFixedThreadPool(threads);
-        try {
-            CountDownLatch start = new CountDownLatch(1);
-            List<Future<?>> work = new ArrayList<>();
-            for (int thread = 0; thread < threads; thread++) {
-                int id = thread;
-                work.add(pool.submit(() -> {
-                    start.await();
-                    for (int index = 0; index < perThread; index++) {
-                        logger.logExternal(new String[] {"INFO", "WARN", "ERROR"}[index % 3], "[t=" + id + " i=" + index + "]",
-                                "thread " + id, index % 2 == 0 ? shot.toString() : null, index % 5 == 0 ? attachment.toString() : null);
-                    }
-                    return null;
-                }));
-            }
-            start.countDown();
-            for (Future<?> done : work) done.get(60, TimeUnit.SECONDS);
-        } finally {
-            pool.shutdownNow();
-            logger.close();
-        }
-        List<String> rows = rows(log);
-        Assert.assertEquals(rows.size(), threads * perThread);
-        Set<String> seen = new TreeSet<>();
-        for (String row : rows) {
-            Assert.assertEquals(count(row, "<td>"), 6, row);
-            Assert.assertTrue(row.startsWith("<tr class='log-entry level-") && row.endsWith("</tr>\n"), row);
-            Matcher id = Pattern.compile("\\[t=(\\d+) i=(\\d+)]").matcher(row);
-            Assert.assertTrue(id.find(), row);
-            seen.add(id.group());
-        }
-        Assert.assertEquals(seen.size(), threads * perThread, "each entry is written once");
-        Assert.assertTrue(Files.readString(log).endsWith(ENTRY_END));
-    }
-
     private static Log4jLogEvent event(Map<String, Object> row) {
         return Log4jLogEvent.newBuilder().setLoggerName("test").setLevel(Level.ERROR).setTimeMillis(1_762_000_000_000L)
                 .setMessage(new ObjectMessage(row)).build();
     }
 
-    /** Fails the test thread if the external entry point reaches capture, recording, or snapshot code. */
-    private static final class FailFastLogger extends CustomLogger {
-        final List<String> forbiddenCalls = new CopyOnWriteArrayList<>();
+    /**
+     * A logger set up to record video at every level whose recorder always looks healthy. The recorder behind it is
+     * disabled on a host without a desktop, so the calls that reach the recorder API are counted here instead,
+     * and each snapshot gives the same finished clip.
+     */
+    private static final class RecordingLogger extends CustomLogger {
+        final List<String> recorderCalls = new CopyOnWriteArrayList<>();
+        private final Path clip;
 
-        FailFastLogger(String name, String path) throws IOException { super(name, path, 100); }
+        RecordingLogger(String name, String path, Path clip) throws IOException {
+            super(name, path, 100, 0, Set.of(Level.INFO, Level.WARN, Level.ERROR), EncodingMode.FAST, null);
+            this.clip = clip;
+        }
 
         @Override public boolean shouldRecordVideoFor(Level level) {
-            forbiddenCalls.add("shouldRecordVideoFor");
-            throw new AssertionError("shouldRecordVideoFor must not be called");
+            recorderCalls.add("shouldRecordVideoFor(" + level + ")");
+            return true;
         }
 
-        @Override public Path snapshotForError(String errorUuid) {
-            forbiddenCalls.add("snapshotForError(String)");
-            throw new AssertionError("snapshotForError must not be called");
+        @Override public CaptureResult snapshotForError(String captureId, Consumer<CaptureResult> register) {
+            recorderCalls.add("snapshotForError");
+            try {
+                Constructor<CaptureResult> constructor = CaptureResult.class.getDeclaredConstructor(
+                        String.class, Path.class, Path.class, String.class);
+                constructor.setAccessible(true);
+                CaptureResult capture = constructor.newInstance(captureId, clip, null, null);
+                register.accept(capture);
+                return capture;
+            } catch (ReflectiveOperationException error) {
+                throw new AssertionError(error);
+            }
         }
-
-        @Override public CaptureResult snapshotForError(String captureId, boolean localRequired, Consumer<CaptureResult> register) {
-            forbiddenCalls.add("snapshotForError(String, boolean, Consumer)");
-            throw new AssertionError("snapshotForError must not be called");
-        }
-    }
-
-    /** Minimal Helios ingest server: it keeps the entries and every request it receives. */
-    private static final class Server implements AutoCloseable {
-        final HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        final List<JSONObject> rows = new CopyOnWriteArrayList<>();
-        final List<String> requests = new CopyOnWriteArrayList<>();
-
-        Server() throws Exception {
-            server.createContext("/api/ingest/sessions", exchange -> {
-                String raw = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
-                requests.add(exchange.getRequestURI().getPath() + " " + raw);
-                JSONObject body = new JSONObject(raw);
-                String[] path = exchange.getRequestURI().getPath().split("/");
-                JSONObject reply;
-                if (path.length == 4) {
-                    reply = new JSONObject().put("sessionId", body.getString("loggerSessionId"))
-                            .put("executionSessionId", "66666666-7777-8888-9999-000000000000")
-                            .put("executionId", body.getString("executionId"))
-                            .put("media", new JSONObject().put("version", 1)
-                                    .put("maxScreenshotBytes", 1048576).put("maxVideoBytes", 8388608));
-                } else if (path.length == 6 && "entries".equals(path[5])) {
-                    JSONArray entries = body.getJSONArray("entries");
-                    for (int i = 0; i < entries.length(); i++) rows.add(entries.getJSONObject(i));
-                    reply = new JSONObject().put("accepted", entries.length()).put("duplicates", 0)
-                            .put("nextOrdinal", body.getInt("firstOrdinal") + entries.length());
-                } else if (path.length > 6) {
-                    reply = new JSONObject();
-                } else {
-                    reply = new JSONObject().put("complete", true).put("storedEntries", body.getInt("expectedEntries"));
-                }
-                byte[] bytes = reply.toString().getBytes(StandardCharsets.UTF_8);
-                exchange.sendResponseHeaders(200, bytes.length);
-                exchange.getResponseBody().write(bytes);
-                exchange.close();
-            });
-            server.start();
-        }
-
-        HeliosConfig config() {
-            return new HeliosConfig("http://127.0.0.1:" + server.getAddress().getPort(), "test-key", "external-aa",
-                    "bot", "master", "file", "machine", "user", null);
-        }
-
-        @Override public void close() { server.stop(0); }
     }
 }

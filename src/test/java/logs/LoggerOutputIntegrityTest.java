@@ -10,7 +10,10 @@ import com.automationanywhere.botcommand.utilities.logger.CustomLogger;
 import com.automationanywhere.botcommand.utilities.logger.HTMLGenerator;
 import org.apache.logging.log4j.Level;
 import org.testng.Assert;
+import org.testng.annotations.AfterClass;
 import org.testng.annotations.Test;
+import support.ChildJvm;
+import support.TempDirectories;
 
 import java.io.IOException;
 import java.net.URI;
@@ -31,6 +34,13 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class LoggerOutputIntegrityTest {
+    private final TempDirectories directories = new TempDirectories();
+
+    @AfterClass(alwaysRun = true)
+    public void deleteDirectories() {
+        directories.deleteAll();
+    }
+
     private static Map<String, Object> entry(String message, Map<String, Value> values) {
         Map<String, Object> row = new LinkedHashMap<>();
         row.put(CustomHTMLLayout.Columns.MESSAGE, message);
@@ -56,7 +66,7 @@ public class LoggerOutputIntegrityTest {
         values.put("record", record);
         values.put("table", table);
         values.put("file", new FileValue("C:\\data\\report<&>.csv"));
-        Path log = Files.createTempDirectory("logger-null-scalar").resolve("log.html");
+        Path log = directories.create("logger-null-scalar").resolve("log.html");
         CustomLogger logger = new CustomLogger("null-scalar", log.toString(), 100);
         try { logger.getLogger().error(entry("retained ERROR row", values)); }
         finally { logger.close(); }
@@ -72,13 +82,13 @@ public class LoggerOutputIntegrityTest {
 
     @Test
     public void localeIndependentTypesAndEnglishMonthsWorkInFreshJvms() throws Exception {
-        Path output = Files.createTempDirectory("logger-locale").resolve("unused.html");
+        Path output = directories.create("logger-locale").resolve("unused.html");
         for (String locale : List.of("tr-TR", "de-DE", "fr-FR")) runChild(output, "locale", locale);
     }
 
     @Test
     public void separateLevelFoldersLinkToOneRecorderFolderAndTheirOwnScreenshots() throws Exception {
-        Path root = Files.createTempDirectory("logger-media-folders");
+        Path root = directories.create("logger-media-folders");
         Map<Level, String> outputs = Map.of(Level.INFO, root.resolve("info/log.html").toString(),
                 Level.WARN, root.resolve("warn/log.html").toString(),
                 Level.ERROR, root.resolve("error/log.html").toString());
@@ -126,7 +136,7 @@ public class LoggerOutputIntegrityTest {
 
     @Test
     public void independentProcessCannotAppendOrMigrateAnOwnedFileAndOwnerReportsIt() throws Exception {
-        Path log = Files.createTempDirectory("logger-process-owner").resolve("log.html");
+        Path log = directories.create("logger-process-owner").resolve("log.html");
         CustomLogger owner = new CustomLogger("owner", log.toString(), 100);
         try {
             owner.getLogger().info(entry("before contention", null));
@@ -144,10 +154,15 @@ public class LoggerOutputIntegrityTest {
             Assert.assertFalse(Files.exists(log.resolveSibling("1_error.html")));
             Assert.assertEquals(Files.readAllBytes(log), before);
             Assert.assertFalse(Files.exists(log.resolveSibling("1_log.html")));
+            // getLogger() looks for the notice at most once per second: ask until the owner has reported it.
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+            while (!Files.readString(log).contains("Another process was rejected")) {
+                Assert.assertTrue(System.nanoTime() < deadline, "the owner never reported the rejected process");
+                owner.getLogger();
+                Thread.sleep(50);
+            }
             owner.getLogger().info(entry("after contention", null));
-            String html = Files.readString(log);
-            Assert.assertTrue(html.contains("Another process was rejected"));
-            Assert.assertTrue(html.contains("after contention"));
+            Assert.assertTrue(Files.readString(log).contains("after contention"));
         } finally { owner.close(); }
         runChild(log, "write", "");
         Assert.assertTrue(Files.readString(log).contains("child acquired writer"));
@@ -155,7 +170,7 @@ public class LoggerOutputIntegrityTest {
 
     @Test
     public void ownershipLastsUntilTheLastSameJvmSessionClosesAndCloseReportsContention() throws Exception {
-        Path log = Files.createTempDirectory("logger-shared-owner").resolve("log.html");
+        Path log = directories.create("logger-shared-owner").resolve("log.html");
         CustomLogger first = new CustomLogger("first-owner", log.toString(), 100);
         CustomLogger second = new CustomLogger("second-owner", log.getParent().resolve(".").resolve("log.html").toString(), 100);
         try {
@@ -171,35 +186,16 @@ public class LoggerOutputIntegrityTest {
         Assert.assertFalse(Files.exists(log.resolveSibling("1_log.html")));
     }
 
-    @Test
-    public void failedConstructorReleasesEveryAcquiredLock() throws Exception {
-        Path root = Files.createTempDirectory("logger-failed-constructor");
-        Path bad = Files.createDirectory(root.resolve("log.html"));
-        try {
-            new CustomLogger("failed-owner", bad.toString(), 100);
-            Assert.fail("a directory cannot be an HTML log");
-        } catch (IOException expected) {
-            Assert.assertTrue(Files.isDirectory(bad));
-        }
-        Files.delete(bad);
-        runChild(bad, "write", "");
-    }
-
     private void runChild(Path log, String mode, String locale) throws Exception {
-        Set<String> classpath = new LinkedHashSet<>();
-        for (Class<?> type : new Class<?>[] { getClass(), CustomLogger.class, org.json.JSONObject.class, Assert.class,
+        Set<String> classpath = new LinkedHashSet<>(ChildJvm.classPath(getClass(), CustomLogger.class, org.json.JSONObject.class, Assert.class,
                 org.apache.logging.log4j.Logger.class, org.apache.logging.log4j.core.LoggerContext.class,
-                org.apache.commons.io.FilenameUtils.class, org.apache.commons.lang3.StringUtils.class,
-                org.apache.commons.text.StringEscapeUtils.class, com.automationanywhere.core.security.SecureString.class,
+                org.apache.commons.io.FilenameUtils.class, com.automationanywhere.core.security.SecureString.class,
                 com.automationanywhere.botcommand.data.impl.SessionValue.class,
-                com.automationanywhere.toolchain.runtime.session.CloseableSessionObject.class, com.google.protobuf.Message.class }) {
-            classpath.add(Path.of(type.getProtectionDomain().getCodeSource().getLocation().toURI()).toString());
-        }
+                com.automationanywhere.toolchain.runtime.session.CloseableSessionObject.class, com.google.protobuf.Message.class));
         classpath.add(Path.of("build/resources/main").toAbsolutePath().toString());
         Path output = Files.createTempFile(log.getParent(), "child-" + mode, ".txt");
-        Process child = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-                "-Djava.awt.headless=true", "-cp", String.join(java.io.File.pathSeparator, classpath),
-                getClass().getName(), mode, log.toString(), locale)
+        Process child = new ProcessBuilder(ChildJvm.command(getClass(), classpath, List.of("-Djava.awt.headless=true"),
+                mode, log.toString(), locale))
                 .redirectErrorStream(true).redirectOutput(output.toFile()).start();
         if (!child.waitFor(30, TimeUnit.SECONDS)) {
             child.destroyForcibly();

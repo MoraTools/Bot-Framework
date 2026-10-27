@@ -5,9 +5,6 @@ import com.automationanywhere.botcommand.data.impl.*;
 import com.automationanywhere.botcommand.data.model.Schema;
 import com.automationanywhere.botcommand.data.model.record.Record;
 import com.automationanywhere.botcommand.data.model.table.Table;
-import org.apache.commons.io.FilenameUtils;
-import org.apache.commons.text.StringEscapeUtils;
-
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -29,35 +26,58 @@ import java.util.regex.Pattern;
  */
 
 public class HTMLGenerator {
+    /** A fixed-length mask reveals nothing about the secret's length. */
+    public static final String CREDENTIAL_MASK = "********";
     private static final String NULL = "NULL";
     // Start once per run so interior spaces do not cause quadratic backtracking.
     private static final Pattern TRAILING_SPACES = Pattern.compile("(?<! )( +)(?=\\n|$)", Pattern.MULTILINE);
-    private static final String NL_MARKER = "<span class='ws-marker ws-nl' aria-hidden='true'>↵</span>\n";
-    private static final String TAB_MARKER = "<span class='ws-marker ws-tab' aria-hidden='true'>→</span>\t";
+    private static final Pattern LINE_BREAK = Pattern.compile("\r\n|[\r\n]");
+    // Empty elements: the viewer CSS draws the glyph with ::before, so each marker costs few bytes.
+    private static final String NL_MARKER = "<i class='ws-nl' aria-hidden='true'></i>";
+    private static final String TAB_MARKER = "<i class='ws-tab' aria-hidden='true'></i>";
 
     /**
      * HTML-escapes the input and inserts visible glyphs for newlines, tabs,
      * and trailing spaces so users can spot whitespace bugs in rendered
-     * logs. Markers carry aria-hidden and rely on user-select: none in CSS
-     * so they do not leak into copy/paste.
+     * logs. Markers are empty elements with aria-hidden; CSS draws the glyph,
+     * so it never reaches copy/paste. A newline marker goes before the line
+     * terminator: a browser reads CR LF and a lone CR as one line break.
      */
     public static String escapeWithWhitespaceMarkers(String s) {
         if (s == null || s.isEmpty()) {
             return s == null ? "" : s;
         }
-        String escaped = StringEscapeUtils.escapeHtml4(s);
+        String escaped = escapeHtml(s);
 
         escaped = TRAILING_SPACES.matcher(escaped).replaceAll(match ->
                 "<span class='ws-trail'><span class='ws-marker' aria-hidden='true'>"
                         + "·".repeat(match.end() - match.start()) + "</span>" + match.group() + "</span>");
 
         if (escaped.indexOf('\t') >= 0) {
-            escaped = escaped.replace("\t", TAB_MARKER);
+            escaped = escaped.replace("\t", TAB_MARKER + "\t");
         }
-        if (escaped.indexOf('\n') >= 0) {
-            escaped = escaped.replace("\n", NL_MARKER);
+        if (escaped.indexOf('\n') >= 0 || escaped.indexOf('\r') >= 0) {
+            escaped = LINE_BREAK.matcher(escaped).replaceAll(NL_MARKER + "$0");
         }
         return escaped;
+    }
+
+    /** Escapes only the five characters that can end text or an attribute; other characters stay as they are. */
+    static String escapeHtml(String text) {
+        if (text == null) return null; // a null dictionary key or column name still renders, as "null"
+        StringBuilder escaped = new StringBuilder(text.length() + 16);
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            switch (c) {
+                case '&': escaped.append("&amp;"); break;
+                case '<': escaped.append("&lt;"); break;
+                case '>': escaped.append("&gt;"); break;
+                case '"': escaped.append("&quot;"); break;
+                case '\'': escaped.append("&#39;"); break;
+                default: escaped.append(c);
+            }
+        }
+        return escaped.toString();
     }
 
     /**
@@ -104,15 +124,15 @@ public class HTMLGenerator {
     private static void appendVariableCard(String name, Value value, StringBuilder htmlBuilder, boolean showNullType) {
         htmlBuilder.append("<div class='variable-card'>")
                 .append("<div class='variable-name'>")
-                .append(StringEscapeUtils.escapeHtml4(name))
+                .append(escapeHtml(name))
                 .append("</div>");
 
         if (value != null || showNullType) {
             htmlBuilder.append(" <div class='variable-type'>")
-                    .append(StringEscapeUtils.escapeHtml4(typeLabel(value)))
+                    .append(escapeHtml(typeLabel(value)))
                     .append("</div>");
         }
-        appendVariableValueWithoutCard(value, htmlBuilder);
+        appendValue(value, htmlBuilder, "<div class='variable-value'>NULL</div>");
         htmlBuilder.append("</div>");
     }
 
@@ -136,33 +156,6 @@ public class HTMLGenerator {
         }
 
         htmlBuilder.append("</details>");
-    }
-
-    private static void appendVariableValueWithoutCard(Value value, StringBuilder htmlBuilder) {
-        if (value == null || value.get() == null) {
-            htmlBuilder.append("<div class='variable-value'>NULL</div>");
-            return;
-        }
-
-        String variableType = typeLabel(value);
-
-        switch (variableType) {
-            case "LIST":
-                appendListValue((ListValue) value, htmlBuilder);
-                break;
-            case "RECORD":
-                appendRecordValue((RecordValue) value, htmlBuilder);
-                break;
-            case "TABLE":
-                appendTableValue((TableValue) value, htmlBuilder);
-                break;
-            case "DICTIONARY":
-                appendDictionaryValue((DictionaryValue) value, htmlBuilder);
-                break;
-            default:
-                appendScalarValue(value, htmlBuilder);
-                break;
-        }
     }
 
     private static void appendDictionaryValue(DictionaryValue dictionaryValue, StringBuilder htmlBuilder) {
@@ -237,7 +230,7 @@ public class HTMLGenerator {
     private static void appendSchemaHeaders(List<Schema> schema, StringBuilder htmlBuilder) {
         for (Schema column : schema) {
             htmlBuilder.append("<th>")
-                    .append(StringEscapeUtils.escapeHtml4(column.getName()))
+                    .append(escapeHtml(column.getName()))
                     .append("</th>");
         }
         htmlBuilder.append("</tr>");
@@ -246,15 +239,15 @@ public class HTMLGenerator {
     private static void appendCells(List<Value> values, StringBuilder htmlBuilder) {
         for (Value value : values) {
             htmlBuilder.append("<td>");
-            appendValueInCell(value, htmlBuilder);
+            appendValue(value, htmlBuilder, NULL);
             htmlBuilder.append("</td>");
         }
     }
 
-    // Helper method for table and record cells
-    private static void appendValueInCell(Value value, StringBuilder htmlBuilder) {
+    /** A card and a table cell show a null value differently, so each caller gives its own null markup. */
+    private static void appendValue(Value value, StringBuilder htmlBuilder, String nullHtml) {
         if (value == null || value.get() == null) {
-            htmlBuilder.append("NULL");
+            htmlBuilder.append(nullHtml);
             return;
         }
 
@@ -274,7 +267,7 @@ public class HTMLGenerator {
     private static void appendScalarValue(Value scalarValue, StringBuilder htmlBuilder) {
         String objectStringValue = "";
         if (scalarValue instanceof CredentialObject) {
-            objectStringValue = ((CredentialObject) scalarValue).get().getInsecureString();
+            objectStringValue = CREDENTIAL_MASK;
         } else if (scalarValue instanceof NumberValue
                 || scalarValue instanceof StringValue
                 || scalarValue instanceof DateTimeValue
@@ -287,26 +280,28 @@ public class HTMLGenerator {
                 .append("</div>");
     }
 
-    public static String getScreenshotHTML(String screenshotPath) {
-        return getScreenshotHTML(screenshotPath, null);
-    }
-
     private static String getScreenshotHTML(String screenshotPath, Path htmlDirectory) {
         if (screenshotPath == null || screenshotPath.isEmpty()) {
             return "";
         }
 
         // Create a relative path to the screenshot
-        String relativePath = mediaHref(screenshotPath, "screenshots", htmlDirectory);
-        String escapedRelativePath = StringEscapeUtils.escapeHtml4(relativePath);
+        String relativePath = mediaHref(screenshotPath, htmlDirectory);
+        String escapedRelativePath = escapeHtml(relativePath);
 
         // Return a link to the screenshot
         return "<a href='" + escapedRelativePath + "' target='_blank' class='img-link' " +
-                "aria-label='Screenshot' title='Screenshot' " +
-                "style='--screenshot-preview: url(\"" + escapedRelativePath + "\")'>" +
-                "<img src='" + escapedRelativePath + "' loading='lazy' decoding='async' " +
-                "width='88' height='50' alt=''>" +
+                "aria-label='Screenshot' title='Screenshot'" + previewStyle(escapedRelativePath) + ">" +
+                thumbnail(escapedRelativePath) +
                 "</a>";
+    }
+
+    private static String previewStyle(String escapedHref) {
+        return " style='--screenshot-preview: url(\"" + escapedHref + "\")'";
+    }
+
+    private static String thumbnail(String escapedHref) {
+        return "<img src='" + escapedHref + "' loading='lazy' decoding='async' width='88' height='50' alt=''>";
     }
 
     /**
@@ -318,29 +313,40 @@ public class HTMLGenerator {
             return "";
         }
         return "<div><a href='"
-                + StringEscapeUtils.escapeHtml4(mediaHref(attachmentPath, "attachments", htmlDirectory))
+                + escapeHtml(mediaHref(attachmentPath, htmlDirectory))
                 + "' target='_blank' rel='noopener'>"
-                + StringEscapeUtils.escapeHtml4(Paths.get(attachmentPath).getFileName().toString())
+                + escapeHtml(Paths.get(attachmentPath).getFileName().toString())
                 + "</a></div>";
     }
 
-    private static String mediaHref(String mediaPath, String folder, Path htmlDirectory) {
-        if (htmlDirectory == null) return folder + "/" + FilenameUtils.getName(mediaPath);
+    private static String mediaHref(String mediaPath, Path htmlDirectory) {
         Path target = Paths.get(mediaPath).toAbsolutePath().normalize();
+        String href;
         try {
             String relative = htmlDirectory.toAbsolutePath().normalize().relativize(target)
                     .toString().replace(java.io.File.separatorChar, '/');
-            String href = new URI(null, null, relative, null).toASCIIString();
-            // A colon before the first slash would read as a URI scheme, for example "javascript:x.txt".
-            int colon = href.indexOf(':'), slash = href.indexOf('/');
-            if (colon >= 0 && (slash < 0 || colon < slash)) href = "./" + href;
-            // URL quoting also protects paths inside the CSS preview declaration.
-            return href.replace("'", "%27").replace("(", "%28").replace(")", "%29");
+            // A colon before the first slash would read as a URI scheme: "javascript:x.txt", or "12:30.txt",
+            // which is not even a legal scheme. Guard the raw text, before it becomes a URI.
+            int colon = relative.indexOf(':'), slash = relative.indexOf('/');
+            if (colon >= 0 && (slash < 0 || colon < slash)) relative = "./" + relative;
+            href = percentEncodeNonAscii(new URI(null, null, relative, null).toString());
         } catch (IllegalArgumentException differentRoot) {
-            return target.toUri().toASCIIString().replace("'", "%27").replace("(", "%28").replace(")", "%29");
+            href = target.toUri().toASCIIString();
         } catch (URISyntaxException invalidPath) {
             throw new IllegalArgumentException("Cannot link log media: " + mediaPath, invalidPath);
         }
+        // URL quoting also protects paths inside the CSS preview declaration.
+        return href.replace("'", "%27").replace("(", "%28").replace(")", "%29");
+    }
+
+    /** Like {@code URI.toASCIIString()} without its NFC step: a file name in another Unicode form keeps its form. */
+    private static String percentEncodeNonAscii(String text) {
+        StringBuilder ascii = new StringBuilder(text.length());
+        for (byte b : text.getBytes(StandardCharsets.UTF_8)) {
+            if (b >= 0) ascii.append((char) b);
+            else ascii.append(String.format("%%%02X", b & 0xFF));
+        }
+        return ascii.toString();
     }
 
     /**
@@ -358,32 +364,25 @@ public class HTMLGenerator {
      * </ol>
      * <p>Empty input on all three produces an empty cell.
      */
-    public static String getScreenCellHTML(String screenshotPath,
-                                           String videoPath,
-                                           String videoPosterPath) {
-        return getScreenCellHTML(screenshotPath, videoPath, videoPosterPath, null);
-    }
-
     public static String getScreenCellHTML(String screenshotPath, String videoPath,
                                            String videoPosterPath, Path htmlDirectory) {
         if (videoPath != null && !videoPath.isEmpty()) {
-            String videoRel = mediaHref(videoPath, "clips", htmlDirectory);
+            String videoRel = mediaHref(videoPath, htmlDirectory);
             String posterRel = (videoPosterPath != null && !videoPosterPath.isEmpty())
-                    ? mediaHref(videoPosterPath, "screenshots", htmlDirectory)
+                    ? mediaHref(videoPosterPath, htmlDirectory)
                     : "";
-            String videoEsc = StringEscapeUtils.escapeHtml4(videoRel);
-            String posterEsc = StringEscapeUtils.escapeHtml4(posterRel);
+            String videoEsc = escapeHtml(videoRel);
+            String posterEsc = escapeHtml(posterRel);
 
             StringBuilder sb = new StringBuilder(256);
             sb.append("<a href='").append(videoEsc).append("' target='_blank' class='img-link video-link' ")
               .append("aria-label='Recording' title='Open recording'");
             if (!posterEsc.isEmpty()) {
-                sb.append(" style='--screenshot-preview: url(\"").append(posterEsc).append("\")'");
+                sb.append(previewStyle(posterEsc));
             }
             sb.append(">");
             if (!posterEsc.isEmpty()) {
-                sb.append("<img src='").append(posterEsc)
-                  .append("' loading='lazy' decoding='async' width='88' height='50' alt=''>");
+                sb.append(thumbnail(posterEsc));
             }
             sb.append("<span class='play-overlay' aria-hidden='true'>&#9654;</span>")
               .append("</a>");
@@ -393,14 +392,12 @@ public class HTMLGenerator {
             // Recording was requested for this row but no clip is available.
             // Show the poster (a complete artifact in its own right) and a
             // small badge so the user knows why no play icon is present.
-            String posterRel = mediaHref(videoPosterPath, "screenshots", htmlDirectory);
-            String posterEsc = StringEscapeUtils.escapeHtml4(posterRel);
+            String posterRel = mediaHref(videoPosterPath, htmlDirectory);
+            String posterEsc = escapeHtml(posterRel);
             return "<a href='" + posterEsc + "' target='_blank' class='img-link video-unavailable' "
                     + "aria-label='Screenshot (video unavailable)' "
-                    + "title='Video unavailable; opens screenshot' "
-                    + "style='--screenshot-preview: url(\"" + posterEsc + "\")'>"
-                    + "<img src='" + posterEsc
-                    + "' loading='lazy' decoding='async' width='88' height='50' alt=''>"
+                    + "title='Video unavailable; opens screenshot'" + previewStyle(posterEsc) + ">"
+                    + thumbnail(posterEsc)
                     + "<span class='no-video-badge' aria-hidden='true'>no video</span>"
                     + "</a>";
         }

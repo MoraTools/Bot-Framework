@@ -2,7 +2,9 @@ package device;
 
 import com.automationanywhere.botcommand.actions.device.DeleteFilesFolders;
 import org.testng.Assert;
+import org.testng.annotations.AfterClass;
 import org.testng.annotations.Test;
+import support.TempDirectories;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -11,13 +13,20 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 
 public class CleanupSafetyTest {
+    private final TempDirectories temp = new TempDirectories();
+
+    @AfterClass(alwaysRun = true)
+    public void deleteTemporaryFolders() {
+        temp.deleteAll();
+    }
+
     private static void old(Path path) throws Exception {
         Files.setLastModifiedTime(path, FileTime.from(Instant.now().minus(60, ChronoUnit.DAYS)));
     }
 
     @Test
     public void nonRecursiveCleanupPreservesExcludedAndYoungDescendants() throws Exception {
-        Path root = Files.createTempDirectory("cleanup-safety");
+        Path root = temp.create("cleanup-safety");
         Path excluded = Files.createDirectory(root.resolve("excluded"));
         Path keep = Files.writeString(excluded.resolve("keep.log"), "protected");
         old(keep); old(excluded);
@@ -37,7 +46,7 @@ public class CleanupSafetyTest {
 
     @Test
     public void recursiveCleanupKeepsYoungDirectoriesAndSkippedSubtrees() throws Exception {
-        Path root = Files.createTempDirectory("cleanup-recursive-safety");
+        Path root = temp.create("cleanup-recursive-safety");
         Path parent = Files.createDirectory(root.resolve("parent"));
         Path emptyYoung = Files.createDirectory(parent.resolve("young-empty"));
         Path protectedDir = Files.createDirectory(parent.resolve("protected"));
@@ -54,7 +63,7 @@ public class CleanupSafetyTest {
 
     @Test
     public void filesOnlyNonRecursiveCleanupDoesNotTouchDescendants() throws Exception {
-        Path root = Files.createTempDirectory("cleanup-files-only-safety");
+        Path root = temp.create("cleanup-files-only-safety");
         Path nested = Files.createDirectory(root.resolve("nested"));
         Path keep = Files.writeString(nested.resolve("old.txt"), "keep");
         Path remove = Files.writeString(root.resolve("old.txt"), "remove");

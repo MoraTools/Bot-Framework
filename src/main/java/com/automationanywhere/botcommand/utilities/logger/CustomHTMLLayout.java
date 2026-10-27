@@ -1,7 +1,6 @@
 package com.automationanywhere.botcommand.utilities.logger;
 
 import com.automationanywhere.botcommand.data.Value;
-import org.apache.commons.text.StringEscapeUtils;
 import org.apache.logging.log4j.core.Layout;
 import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.core.config.Node;
@@ -35,7 +34,7 @@ import java.util.regex.Pattern;
  */
 @Plugin(name = "CustomHTMLLayout", category = Node.CATEGORY, elementType = Layout.ELEMENT_TYPE, printObject = true)
 public class CustomHTMLLayout extends AbstractStringLayout {
-    static final String FORMAT_MARKER = "<!-- a360-log-format:6 -->";
+    static final String FORMAT_MARKER = "<!-- a360-log-format:7 -->";
     static final String IDENTITY_MARKER;
     static final String HEADER_END = "<!-- a360-log-header:end -->\n";
     static final String ENTRY_END = "<!-- a360-log-entry:end -->\n";
@@ -50,11 +49,11 @@ public class CustomHTMLLayout extends AbstractStringLayout {
             user = System.getProperty("user.name");
             IDENTITY_MARKER = "<!-- a360-log-identity:" + Base64.getUrlEncoder().withoutPadding().encodeToString(
                     MessageDigest.getInstance("SHA-256").digest((machine + "\0" + user).getBytes(StandardCharsets.UTF_8))) + " -->";
-            // The packaged resource is minified at build time. Replace placeholders in one pass.
-            String html = new String(template.readAllBytes(), StandardCharsets.UTF_8)
+            // A checkout can give the template CR LF line ends. The logger recognizes its files by LF boundaries.
+            String html = new String(template.readAllBytes(), StandardCharsets.UTF_8).replace("\r\n", "\n")
                     .replace("{{identity}}", IDENTITY_MARKER);
             header = Pattern.compile("\\{\\{(machine|user)\\}\\}").matcher(html).replaceAll(match ->
-                    Matcher.quoteReplacement(StringEscapeUtils.escapeHtml4(
+                    Matcher.quoteReplacement(HTMLGenerator.escapeHtml(
                             String.valueOf(match.group(1).equals("machine") ? machine : user)))).getBytes(StandardCharsets.UTF_8);
         } catch (IOException | NoSuchAlgorithmException e) {
             throw new RuntimeException(e);
@@ -67,13 +66,9 @@ public class CustomHTMLLayout extends AbstractStringLayout {
 
     private final Path htmlDirectory;
 
-    public CustomHTMLLayout(Charset charset) {
-        this(charset, null);
-    }
-
     private CustomHTMLLayout(Charset charset, String htmlDirectory) {
         super(charset);
-        this.htmlDirectory = htmlDirectory == null ? null : Paths.get(htmlDirectory);
+        this.htmlDirectory = Paths.get(Objects.requireNonNull(htmlDirectory, "htmlDirectory is required"));
     }
 
     @PluginBuilderFactory
@@ -143,11 +138,11 @@ public class CustomHTMLLayout extends AbstractStringLayout {
         formattedContent = String.format(
                 "<tr class='log-entry %s'>"
                         + "<td>%s<td>%s<td>%s<td>%s<td>%s<td>%s</tr>\n" + ENTRY_END,
-                StringEscapeUtils.escapeHtml4(levelClass),
-                StringEscapeUtils.escapeHtml4(formatTimestamp(event.getTimeMillis())),
-                StringEscapeUtils.escapeHtml4(event.getLevel().toString()),
-                StringEscapeUtils.escapeHtml4(sourceBotPath),
-                HTMLGenerator.escapeWithWhitespaceMarkers(message) + attachmentHTML,
+                HTMLGenerator.escapeHtml(levelClass),
+                HTMLGenerator.escapeHtml(formatTimestamp(event.getTimeMillis())),
+                HTMLGenerator.escapeHtml(event.getLevel().toString()),
+                HTMLGenerator.escapeHtml(sourceBotPath),
+                "<div class='message'>" + HTMLGenerator.escapeWithWhitespaceMarkers(message) + "</div>" + attachmentHTML,
                 variablesHTML,
                 screenCell
         );
@@ -180,16 +175,6 @@ public class CustomHTMLLayout extends AbstractStringLayout {
         private String htmlDirectory;
 
         private Builder() {
-        }
-
-        public Builder withCharset(Charset charset) {
-            this.charset = charset;
-            return this;
-        }
-
-        public Builder withHtmlDirectory(String htmlDirectory) {
-            this.htmlDirectory = htmlDirectory;
-            return this;
         }
 
         @Override

@@ -149,24 +149,16 @@ public class DeleteFilesFolders {
             );
             Files.walkFileTree(basePath, collector);
 
-            // Phase 2: Process the data - resolve conflicts between delete and skip lists
-            DeletionProcessor processor = new DeletionProcessor(
-                    basePath,
-                    collector.filesToDelete,
-                    collector.directoriesToDelete,
-                    collector.filesToSkip,
-                    collector.directoriesToSkip,
-                    collector.youngFiles
-            );
-
-            // Phase 3: Execute deletions
+            // Phase 2: Execute deletions. A directory that still holds a kept item is not empty and stays.
             if (selectMethod.equalsIgnoreCase(PROCESS_ONLY_FILE_TYPE) ||
                     selectMethod.equalsIgnoreCase(PROCESS_ALL_TYPES)) {
-                delete(processor.getFilesToDelete(), unableToDeleteBehavior, collector, false);
+                delete(new ArrayList<>(collector.filesToDelete), unableToDeleteBehavior, collector, false);
             }
 
             if (selectMethod.equalsIgnoreCase(PROCESS_ALL_TYPES)) {
-                delete(processor.getSortedDirectoriesToDelete(), unableToDeleteBehavior, collector, !recursive);
+                List<Path> directories = new ArrayList<>(collector.directoriesToDelete);
+                directories.sort(Comparator.comparingInt(Path::getNameCount).reversed());
+                delete(directories, unableToDeleteBehavior, collector, !recursive);
             }
 
             LOGGER.info("Deletion process completed successfully");
@@ -237,7 +229,7 @@ public class DeleteFilesFolders {
     /**
      * Helper class that collects files and directories during file tree traversal.
      */
-    private static class FileCollector extends SimpleFileVisitor<Path> {
+    static class FileCollector extends SimpleFileVisitor<Path> {
         private final Path basePath;
         private final boolean recursive;
         private final String thresholdCriteria;
@@ -248,9 +240,9 @@ public class DeleteFilesFolders {
         private final Pattern skipFolderPattern;
 
         private final Set<Path> filesToDelete = new HashSet<>();
-        private final Set<Path> directoriesToDelete = new HashSet<>();
+        final Set<Path> directoriesToDelete = new HashSet<>();
         private final Set<Path> filesToSkip = new HashSet<>();
-        private final Set<Path> directoriesToSkip = new HashSet<>();
+        final Set<Path> directoriesToSkip = new HashSet<>();
         private final Set<Path> youngFiles = new HashSet<>(); // Track files too young to delete
 
         public FileCollector(
@@ -277,6 +269,13 @@ public class DeleteFilesFolders {
             // Skip processing of the base path for deletion (never delete the base path)
             if (dir.equals(basePath)) {
                 return FileVisitResult.CONTINUE;
+            }
+
+            // A Windows junction is reported as a directory: entering it would delete files outside the base path
+            if (attrs.isOther()) {
+                LOGGER.info("Skipping junction: " + dir);
+                directoriesToSkip.add(dir);
+                return FileVisitResult.SKIP_SUBTREE;
             }
 
             // Check if this directory should be skipped based on pattern
@@ -355,75 +354,6 @@ public class DeleteFilesFolders {
             } catch (PatternSyntaxException e) {
                 throw new BotCommandException("Invalid regex pattern: '" + pattern + "'. " + e.getMessage());
             }
-        }
-    }
-
-    /**
-     * Helper class that processes file and directory lists to resolve conflicts
-     * and prepare for deletion.
-     */
-    private static class DeletionProcessor {
-        private final Path basePath;
-        private final Set<Path> filesToDelete;
-        private final Set<Path> directoriesToDelete;
-        private final Set<Path> directoriesToPreserve = new HashSet<>();
-
-        public DeletionProcessor(
-                Path basePath,
-                Set<Path> filesToDelete,
-                Set<Path> directoriesToDelete,
-                Set<Path> filesToSkip,
-                Set<Path> directoriesToSkip,
-                Set<Path> youngFiles) {
-            this.basePath = basePath;
-            this.filesToDelete = new HashSet<>(filesToDelete);
-            this.directoriesToDelete = new HashSet<>(directoriesToDelete);
-
-            // Always preserve the base path
-            directoriesToPreserve.add(basePath);
-
-            // Process skipped files - preserve their parent directories
-            for (Path skippedFile : filesToSkip) {
-                addParentsToPreserveList(skippedFile);
-            }
-
-            // Process skipped directories - preserve them and their parent directories
-            for (Path skippedDir : directoriesToSkip) {
-                directoriesToPreserve.add(skippedDir);
-                addParentsToPreserveList(skippedDir);
-            }
-
-            // Process young files - preserve their parent directories
-            for (Path youngFile : youngFiles) {
-                addParentsToPreserveList(youngFile);
-            }
-
-            // Remove preserved directories from deletion list
-            this.directoriesToDelete.removeAll(directoriesToPreserve);
-
-            LOGGER.info("Files to delete after processing: " + this.filesToDelete.size());
-            LOGGER.info("Directories to delete after processing: " + this.directoriesToDelete.size());
-            LOGGER.info("Directories preserved for containing skipped items: " +
-                    (directoriesToPreserve.size() - 1)); // -1 for basePath
-        }
-
-        private void addParentsToPreserveList(Path path) {
-            Path parent = path.getParent();
-            while (parent != null && !parent.equals(basePath)) {
-                directoriesToPreserve.add(parent);
-                parent = parent.getParent();
-            }
-        }
-
-        public List<Path> getFilesToDelete() {
-            return new ArrayList<>(filesToDelete);
-        }
-
-        public List<Path> getSortedDirectoriesToDelete() {
-            List<Path> sortedDirectories = new ArrayList<>(directoriesToDelete);
-            // Sort by depth (descending) - delete deepest directories first
-            sortedDirectories.sort((p1, p2) -> Integer.compare(p2.getNameCount(), p1.getNameCount()));
-            return sortedDirectories;
         }
     }
 }

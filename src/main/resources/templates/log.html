@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- a360-log-format:6 -->
+<!-- a360-log-format:7 -->
 {{identity}}
 <html lang='en'>
 <head>
@@ -22,6 +22,7 @@
             --hover: #f1f3f4;
             --radius-sm: 6px;
             --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            --message-lines: 5;
         }
         @media (prefers-color-scheme: dark) {
             :root {
@@ -73,9 +74,9 @@
         .log-table th:nth-child(5) { width: 128px; }
         .log-table th:nth-child(6) { width: 116px; }
         .log-entry > td:nth-child(-n+3) { font-size: 12px; line-height: 1.4; }
-        .vars-link { font-size: 12px; white-space: nowrap; }
+        .vars-link, .more { font-size: 12px; white-space: nowrap; }
         .log-entry > td:first-child { font-variant-numeric: tabular-nums; }
-        .log-entry:nth-child(even) { background: var(--surface-2); }
+        .log-entry:nth-child(odd) { background: var(--surface-2); }
         .log-entry:hover { background: var(--hover); outline: 2px solid var(--primary); outline-offset: -2px; }
         .log-entry.level-ERROR { background: #fce9e8; }
         .log-entry.level-ERROR:hover { background: #f8d2cc; outline-color: var(--danger); }
@@ -98,9 +99,19 @@
         .dialog-heading h2 { margin: 0; font-size: 20px; }
         #detail-context { color: var(--muted); margin: 8px 0 16px; }
         #detail-content > img, #detail-content > video { display: block; max-width: 100%; max-height: 65vh; margin: auto; }
-        .empty-log { padding: 20px; color: var(--muted); }
-        body:has(.log-entry) .empty-log { display: none; }
+        .log-table .empty-log > td { padding: 20px; color: var(--muted); }
+        .empty-log:not(:last-child) { display: none; }
         .log-entry > td:nth-child(4) { white-space: pre-wrap; overflow-wrap: anywhere; }
+        /* Only a page that runs the script cuts messages, so a page without JavaScript still shows every line. */
+        .js .message { max-height: calc(var(--message-lines) * 1.55em); max-height: calc(var(--message-lines) * 1lh); overflow: hidden; }
+        /* The last visible line fades, so a cut message reads as cut before the button is seen. */
+        .js .message.cut { -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 1lh), rgb(0 0 0 / .3)); mask-image: linear-gradient(to bottom, #000 calc(100% - 1lh), rgb(0 0 0 / .3)); }
+        .js .message.open { max-height: none; -webkit-mask-image: none; mask-image: none; }
+        .more { display: none; margin-top: 6px; font-weight: 600; }
+        .js .message.cut:not(.open) + .more { display: inline-flex; align-items: center; gap: 8px; }
+        .more > svg { flex: none; fill: currentColor; }
+        .message-lead { margin: 0 0 12px; font-weight: 600; white-space: pre-wrap; }
+        .message-full { margin: 0; padding: 12px 14px; font: 13px/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px; }
         .entry-variables { margin-top: 10px; }
         summary { cursor: pointer; min-height: 36px; padding: 6px 0; }
         summary:hover { color: var(--primary); }
@@ -147,9 +158,12 @@
         .table-container tr:has(td):hover { background: var(--hover); }
         .table-container td > .variable-value { margin-top: 0; }
         .table-container .table-container { max-height: 40vh; }
-        .ws-marker { color: var(--muted); user-select: none; }
-        .ws-tab { font-size: 0.85em; margin-right: -0.4em; }
-        .ws-nl { font-size: 0.85em; margin-left: 2px; }
+        .ws-marker, .ws-tab, .ws-nl { color: var(--muted); user-select: none; }
+        .ws-tab, .ws-nl { font-size: 0.85em; font-style: normal; }
+        .ws-tab { margin-right: -0.4em; }
+        .ws-nl { margin-left: 2px; }
+        .ws-tab::before { content: '→'; }
+        .ws-nl::before { content: '↵'; }
         .ws-trail { position: relative; }
         .ws-trail > .ws-marker { position: absolute; left: 0; top: 0; pointer-events: none; }
         .img-link { display: inline-flex; position: relative; border-radius: var(--radius-sm); }
@@ -185,7 +199,8 @@
             text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
             pointer-events: none;
         }
-        .video-link:not(:has(img)) { min-width: 88px; min-height: 50px; background: #202124; }
+        .video-link { min-width: 88px; min-height: 50px; }
+        .video-link .play-overlay:first-child { background: #202124; border-radius: inherit; }
         .no-video-badge {
             position: absolute; bottom: 2px; right: 2px;
             padding: 1px 4px;
@@ -208,6 +223,10 @@
         @media (prefers-reduced-motion: reduce) {
             *, *::before, *::after { scroll-behavior: auto; transition: none; }
         }
+        @media print {
+            .js .message { max-height: none; -webkit-mask-image: none; mask-image: none; }
+            .more { display: none !important; }
+        }
     </style>
 </head>
 <body>
@@ -221,8 +240,61 @@
 </dialog>
 <script>
 (() => {
+    document.documentElement.classList.add('js');
     const dialog = document.getElementById('detail'), content = document.getElementById('detail-content');
-    let request = 0, opener;
+    let request = 0, opener, frame;
+    // Reads every height before it writes a class, so one layout serves the whole log.
+    function markCutMessages() {
+        const messages = document.querySelectorAll('.message');
+        const cut = Array.from(messages, message => message.scrollHeight > message.clientHeight + 1);
+        messages.forEach((message, index) => {
+            message.classList.toggle('cut', cut[index]);
+            if (cut[index] && !message.nextElementSibling?.classList.contains('more')) {
+                const more = document.createElement('button');
+                more.type = 'button'; more.className = 'more';
+                more.innerHTML = "<svg width='16' height='4' viewBox='0 0 16 4' aria-hidden='true'><circle cx='2' cy='2' r='2'/>"
+                    + "<circle cx='8' cy='2' r='2'/><circle cx='14' cy='2' r='2'/></svg>Show full message";
+                message.after(more);
+            }
+        });
+    }
+    document.addEventListener('DOMContentLoaded', markCutMessages);
+    addEventListener('resize', () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(markCutMessages); });
+    // The message text without the whitespace markers.
+    function messageText(message) {
+        const walker = document.createTreeWalker(message, NodeFilter.SHOW_TEXT, {acceptNode: node =>
+            node.parentElement.closest('.ws-marker') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT});
+        let text = '';
+        while (walker.nextNode()) text += walker.currentNode.nodeValue;
+        return text;
+    }
+    // Like JSON.stringify(value, null, 2), but a string value shows its line breaks, for example a page dump.
+    function pretty(value, indent) {
+        const inner = indent + '  ';
+        if (Array.isArray(value)) {
+            return value.length ? '[\n' + value.map(item => inner + pretty(item, inner)).join(',\n') + '\n' + indent + ']' : '[]';
+        }
+        if (value && typeof value === 'object') {
+            const keys = Object.keys(value);
+            return keys.length ? '{\n' + keys.map(key => inner + JSON.stringify(key) + ': ' + pretty(value[key], inner)).join(',\n')
+                + '\n' + indent + '}' : '{}';
+        }
+        if (typeof value !== 'string') return JSON.stringify(value);
+        return '"' + value.split(/\r?\n/).map(line => JSON.stringify(line).slice(1, -1)).join('\n' + inner) + '"';
+    }
+    // A message that ends in JSON, for example 'bridge_response {...}', opens with the JSON indented.
+    function showMessage(text) {
+        const start = text.search(/[[{]/);
+        let lead = '', body = text;
+        if (start >= 0) {
+            try { body = pretty(JSON.parse(text.slice(start)), ''); lead = text.slice(0, start).trim(); }
+            catch (notJson) { body = text; }
+        }
+        if (lead) { const paragraph = document.createElement('p'); paragraph.className = 'message-lead'; paragraph.textContent = lead; content.append(paragraph); }
+        const full = document.createElement('pre');
+        full.className = 'message-full'; full.textContent = body;
+        content.append(full);
+    }
     function clear() {
         request++;
         const video = content.querySelector('video');
@@ -250,19 +322,26 @@
         });
     }
     document.addEventListener('click', async event => {
-        const control = event.target.closest('[data-vars], .img-link');
+        const control = event.target.closest('[data-vars], .img-link, .more');
         if (!control || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button !== 0) return;
-        if (!dialog.showModal) { if (control.hasAttribute('data-vars')) alert('This browser cannot open variables. Open this file in a current version of Chrome, Edge, Firefox, or Safari.'); return; }
+        const message = control.classList.contains('more');
+        if (!dialog.showModal) {
+            if (message) control.previousElementSibling.classList.add('open');
+            else if (control.hasAttribute('data-vars')) alert('This browser cannot open variables. Open this file in a current version of Chrome, Edge, Firefox, or Safari.');
+            return;
+        }
         event.preventDefault();
         clear();
         const ticket = request;
         opener = control;
         const variables = control.hasAttribute('data-vars'), video = control.classList.contains('video-link');
-        document.getElementById('detail-title').textContent = variables ? 'Variables' : video ? 'Recording' : 'Screenshot';
+        document.getElementById('detail-title').textContent = message ? 'Message' : variables ? 'Variables' : video ? 'Recording' : 'Screenshot';
         const cells = control.closest('tr').cells;
         document.getElementById('detail-context').textContent = [cells[0], cells[1], cells[2]].map(cell => cell.textContent).join(' · ');
         dialog.showModal();
-        if (variables) {
+        if (message) {
+            showMessage(messageText(control.previousElementSibling));
+        } else if (variables) {
             content.textContent = 'Loading variables…';
             try {
                 if (!window.DecompressionStream) throw new Error('unsupported');
@@ -298,8 +377,8 @@
 </script>
 <noscript>JavaScript is required to open compressed variables. Messages and media links remain available.</noscript>
 <div class='log-scroll' tabindex='0' role='region' aria-label='Log entries'>
-<p class='empty-log'>No entries yet.</p>
 <table class='log-table'>
 <thead><tr><th scope='col'>Datetime</th><th scope='col'>Level</th><th scope='col'>Source</th><th scope='col'>Message</th><th scope='col'>Variables</th><th scope='col'>Screen</th></tr></thead>
 <tbody>
+<tr class='empty-log'><td colspan='6'>No entries yet.</td></tr>
 <!-- a360-log-header:end -->

@@ -92,9 +92,9 @@ public class XMLReaderTest {
         Assert.assertEquals("text3", result.get().get("3").get().toString());
     }
 
-    @Test(expectedExceptions = BotCommandException.class)
-    public void testInvalidXmlFilePath() {
-        xmlReader.action(
+    @Test
+    public void testMissingXmlFileNamesThePath() {
+        BotCommandException e = Assert.expectThrows(BotCommandException.class, () -> xmlReader.action(
                 INPUT_TYPE_FILE,
                 INVALID_FILE_PATH,
                 CHARSET_UTF_8,
@@ -105,7 +105,8 @@ public class XMLReaderTest {
                 VALUE_OPTION_TAG_TEXT,
                 null,
                 false
-        );
+        ));
+        Assert.assertTrue(e.getMessage().contains(INVALID_FILE_PATH), e.getMessage());
     }
 
 }

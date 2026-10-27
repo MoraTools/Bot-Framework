@@ -2,7 +2,9 @@ package com.automationanywhere.botcommand.utilities.helios;
 
 import org.json.JSONObject;
 import org.testng.Assert;
+import org.testng.annotations.AfterClass;
 import org.testng.annotations.Test;
+import support.TempDirectories;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -13,6 +15,11 @@ import java.time.format.DateTimeFormatter;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class HeliosJournalTest {
+    private final TempDirectories temp = new TempDirectories();
+
+    @AfterClass(alwaysRun = true)
+    public void deleteTemporaryFolders() { temp.deleteAll(); }
+
     private static JSONObject row(int ordinal, String message) {
         return new JSONObject().put("firstOrdinal", ordinal)
                 .put("entries", new org.json.JSONArray().put(new JSONObject().put("message", message)));
@@ -20,26 +27,24 @@ public class HeliosJournalTest {
 
     @Test
     public void replayKeepsOrdinalsUtf8AndBatchBounds() throws Exception {
-        Path path = Files.createTempDirectory("helios-journal-test").resolve("session.helios-journal");
+        Path path = temp.create("helios-journal-test").resolve("session.helios-journal");
         try (HeliosJournal journal = new HeliosJournal(path, new JSONObject().put("executionId", "test"))) {
             for (int index = 0; index < 60; index++) journal.append(row(index, "á漢字 " + index));
-            JSONObject batch = journal.next();
+            JSONObject batch = journal.next(HeliosJournal.BATCH_ENTRIES);
             Assert.assertEquals(batch.getJSONArray("entries").length(), 50);
             Assert.assertEquals(batch.getJSONArray("entries").getJSONObject(9).getString("message"), "á漢字 9");
-            Assert.assertEquals(journal.next().toString(), batch.toString(), "no cursor advance before ack");
+            Assert.assertEquals(journal.next(HeliosJournal.BATCH_ENTRIES).toString(), batch.toString(), "no cursor advance before ack");
             journal.acknowledge(batch.getLong("journalOffset"));
-            Assert.assertEquals(journal.next().getInt("firstOrdinal"), 50);
+            Assert.assertEquals(journal.next(HeliosJournal.BATCH_ENTRIES).getInt("firstOrdinal"), 50);
         }
         try (HeliosJournal recovered = new HeliosJournal(path, null)) {
-            Assert.assertEquals(recovered.next().getInt("firstOrdinal"), 0, "restart replays safely from disk");
+            Assert.assertEquals(recovered.next(HeliosJournal.BATCH_ENTRIES).getInt("firstOrdinal"), 0, "restart replays safely from disk");
         }
-        Files.delete(path);
-        Files.delete(path.getParent());
     }
 
     @Test
     public void writesOneUtf8SnapshotAtTheLimitAndStillSavesTheClosingRecord() throws Exception {
-        Path path = Files.createTempDirectory("helios-encoded-record").resolve("session.helios-journal");
+        Path path = temp.create("helios-encoded-record").resolve("session.helios-journal");
         AtomicInteger serializations = new AtomicInteger();
         JSONObject record = new JSONObject() {
             @Override public String toString() {
@@ -54,72 +59,64 @@ public class HeliosJournalTest {
         String savedPrefix = start + "\n" + record + "\n";
         long limit = savedPrefix.getBytes(StandardCharsets.UTF_8).length;
         serializations.set(0);
-        try {
-            try (HeliosJournal journal = new HeliosJournal(path, start, limit)) {
-                journal.append(record);
-                Assert.assertEquals(serializations.get(), 1, "size check and write use the same serialization");
-                Assert.assertEquals(Files.size(path), limit, "an entry at the exact byte limit is accepted");
-                Assert.expectThrows(java.io.IOException.class, () -> journal.append(row(1, "over limit")));
-                Assert.assertEquals(Files.size(path), limit, "a rejected entry leaves the saved bytes intact");
-                journal.append(end);
-            }
-            Assert.assertEquals(Files.readAllBytes(path),
-                    (savedPrefix + end + "\n").getBytes(StandardCharsets.UTF_8));
-            try (HeliosJournal recovered = new HeliosJournal(path, null)) {
-                JSONObject batch = recovered.next();
-                Assert.assertEquals(batch.getInt("firstOrdinal"), 0);
-                Assert.assertEquals(batch.getJSONArray("entries").length(), 1);
-                Assert.assertEquals(batch.getJSONArray("entries").getJSONObject(0).getString("message"), message);
-                recovered.acknowledge(batch.getLong("journalOffset"));
-                Assert.assertEquals(recovered.next().toString(), end.toString());
-            }
-        } finally {
-            Files.deleteIfExists(path);
-            Files.delete(path.getParent());
+        try (HeliosJournal journal = new HeliosJournal(path, start, limit)) {
+            journal.append(record);
+            Assert.assertEquals(serializations.get(), 1, "size check and write use the same serialization");
+            Assert.assertEquals(Files.size(path), limit, "an entry at the exact byte limit is accepted");
+            Assert.expectThrows(java.io.IOException.class, () -> journal.append(row(1, "over limit")));
+            Assert.assertEquals(Files.size(path), limit, "a rejected entry leaves the saved bytes intact");
+            journal.append(end);
+        }
+        Assert.assertEquals(Files.readAllBytes(path),
+                (savedPrefix + end + "\n").getBytes(StandardCharsets.UTF_8));
+        try (HeliosJournal recovered = new HeliosJournal(path, null)) {
+            JSONObject batch = recovered.next(HeliosJournal.BATCH_ENTRIES);
+            Assert.assertEquals(batch.getInt("firstOrdinal"), 0);
+            Assert.assertEquals(batch.getJSONArray("entries").length(), 1);
+            Assert.assertEquals(batch.getJSONArray("entries").getJSONObject(0).getString("message"), message);
+            recovered.acknowledge(batch.getLong("journalOffset"));
+            Assert.assertEquals(recovered.next(HeliosJournal.BATCH_ENTRIES).toString(), end.toString());
         }
     }
 
     @Test
     public void gapsAndLargeEntriesDoNotChangeOtherOrdinals() throws Exception {
-        Path path = Files.createTempDirectory("helios-gap-test").resolve("session.helios-journal");
+        Path path = temp.create("helios-gap-test").resolve("session.helios-journal");
         try (HeliosJournal journal = new HeliosJournal(path, new JSONObject())) {
             journal.append(row(0, "first"));
             journal.append(row(2, "x".repeat(HeliosJournal.BATCH_BYTES)));
             journal.append(row(3, "last"));
-            JSONObject first = journal.next();
+            JSONObject first = journal.next(HeliosJournal.BATCH_ENTRIES);
             Assert.assertEquals(first.getJSONArray("entries").length(), 1);
             journal.acknowledge(first.getLong("journalOffset"));
-            JSONObject large = journal.next();
+            JSONObject large = journal.next(HeliosJournal.BATCH_ENTRIES);
             Assert.assertEquals(large.getInt("firstOrdinal"), 2);
             Assert.assertEquals(large.getJSONArray("entries").length(), 1, "large event travels alone");
             journal.acknowledge(large.getLong("journalOffset"));
-            Assert.assertEquals(journal.next().getInt("firstOrdinal"), 3);
+            Assert.assertEquals(journal.next(HeliosJournal.BATCH_ENTRIES).getInt("firstOrdinal"), 3);
             journal.rewind();
-            Assert.assertEquals(journal.next().getInt("firstOrdinal"), 0);
+            Assert.assertEquals(journal.next(HeliosJournal.BATCH_ENTRIES).getInt("firstOrdinal"), 0);
         }
         Files.writeString(path, "{broken", StandardOpenOption.APPEND);
         try (HeliosJournal journal = new HeliosJournal(path, null)) {
             for (int index = 0; index < 2; index++) {
-                JSONObject batch = journal.next();
+                JSONObject batch = journal.next(HeliosJournal.BATCH_ENTRIES);
                 journal.acknowledge(batch.getLong("journalOffset"));
             }
-            JSONObject savedPrefix = journal.next();
+            JSONObject savedPrefix = journal.next(HeliosJournal.BATCH_ENTRIES);
             Assert.assertEquals(savedPrefix.getInt("firstOrdinal"), 3);
             journal.acknowledge(savedPrefix.getLong("journalOffset"));
-            Assert.expectThrows(java.io.InvalidObjectException.class, journal::next);
+            Assert.expectThrows(java.io.InvalidObjectException.class, () -> journal.next(HeliosJournal.BATCH_ENTRIES));
         }
         Assert.assertTrue(Files.exists(path), "a torn record must never be treated as verified");
-        Files.delete(path);
-        Files.delete(path.getParent());
     }
 
     @Test
     public void recoveryNeverRecreatesADeletedJournal() throws Exception {
-        Path directory = Files.createTempDirectory("helios-deleted-test");
+        Path directory = temp.create("helios-deleted-test");
         Path missing = directory.resolve("deleted.helios-journal");
         Assert.expectThrows(java.nio.file.NoSuchFileException.class, () -> new HeliosJournal(missing, null));
         Assert.assertFalse(Files.exists(missing));
-        Files.delete(directory);
     }
 
     /** Separate-process lock holder used by the recovery test on Linux and Windows. */

@@ -5,10 +5,6 @@ import com.automationanywhere.botcommand.data.impl.FileValue;
 import com.automationanywhere.botcommand.exception.BotCommandException;
 import com.automationanywhere.botcommand.utilities.logger.CustomHTMLLayout;
 import com.automationanywhere.botcommand.utilities.logger.CustomLogger;
-import com.automationanywhere.botcommand.utilities.screen.CaptureScreen;
-import com.automationanywhere.botcommand.utilities.helios.CloudMediaMode;
-import com.automationanywhere.botcommand.utilities.helios.ErrorMedia;
-import com.automationanywhere.botcommand.utilities.screen.recorder.CaptureResult;
 import com.automationanywhere.commandsdk.annotations.*;
 import com.automationanywhere.commandsdk.annotations.rules.NotEmpty;
 import com.automationanywhere.commandsdk.annotations.rules.SelectModes;
@@ -17,17 +13,13 @@ import com.automationanywhere.commandsdk.annotations.rules.VariableMapAllowedDat
 import com.automationanywhere.commandsdk.model.AttributeType;
 import com.automationanywhere.commandsdk.model.DataType;
 import org.apache.logging.log4j.Level;
-import org.apache.logging.log4j.Logger;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.UUID;
 
 /**
  * @author Sumit Kumar
@@ -115,51 +107,19 @@ public class LogMessage {
     ) {
         try {
             Map<String, Value> variableValues = LOG_VARIABLE.equalsIgnoreCase(logVariable) ? sourceMap : null;
-            String screenshotPath = "";
-            String videoPosterPath = "";
-            String videoPath = "";
 
             // Convert string log level to Log4j Level
             Level log4jLevel = convertToLog4jLevel(logLevel);
 
             if (!LEVEL_INFO.equals(logLevel) && !LEVEL_WARN.equals(logLevel) && !LEVEL_ERROR.equals(logLevel))
                 throw new BotCommandException("Invalid log level");
-            boolean cloudError = LEVEL_ERROR.equals(logLevel) && session.getCloudMediaMode() != CloudMediaMode.OFF;
-            boolean localVideo = session.shouldRecordVideoFor(log4jLevel);
-            boolean cloudVideo = cloudError && session.getCloudMediaMode() == CloudMediaMode.VIDEO;
-            String stillFailure = null;
-            if (localVideo || cloudError || Boolean.TRUE.equals(captureScreenshot)) {
-                String still = generateRandomScreenshotPath(session.getScreenshotFolderPath(log4jLevel), logLevel);
-                try {
-                    CaptureScreen.captureDesktop(still, true);
-                    if (localVideo) videoPosterPath = still;
-                    if (Boolean.TRUE.equals(captureScreenshot)) screenshotPath = still;
-                    if (cloudError && videoPosterPath.isEmpty()) videoPosterPath = still;
-                } catch (Exception captureError) {
-                    if (!cloudError) throw captureError;
-                    stillFailure = "captureFailed";
-                }
-            }
 
             Map<String, Object> message = new HashMap<>();
             message.put(CustomHTMLLayout.Columns.MESSAGE, logMessage);
-            message.put(CustomHTMLLayout.Columns.SCREENSHOT, screenshotPath);
-            message.put(CustomHTMLLayout.Columns.VIDEO, "");
-            message.put(CustomHTMLLayout.Columns.VIDEO_POSTER, localVideo ? videoPosterPath : "");
+            message.put(CustomHTMLLayout.Columns.SCREENSHOT, "");
             message.put(CustomHTMLLayout.Columns.VARIABLES, variableValues);
             message.put(CustomHTMLLayout.Columns.SOURCE, getFormattedBotUri());
-            Path still = videoPosterPath.isEmpty() ? (screenshotPath.isEmpty() ? null : Paths.get(screenshotPath)) : Paths.get(videoPosterPath);
-            String captureFailure = stillFailure;
-            java.util.concurrent.atomic.AtomicBoolean registered = new java.util.concurrent.atomic.AtomicBoolean();
-            java.util.function.Consumer<CaptureResult> register = capture -> {
-                if (!registered.compareAndSet(false, true)) return;
-                if (localVideo && capture != null && capture.video != null)
-                    message.put(CustomHTMLLayout.Columns.VIDEO, capture.video.toString());
-                if (cloudError) message.put(ErrorMedia.COLUMN, new ErrorMedia(still, captureFailure, capture, cloudVideo, !localVideo && !Boolean.TRUE.equals(captureScreenshot)));
-                session.getLogger().log(log4jLevel, message);
-            };
-            if (localVideo || cloudVideo) session.snapshotForError(UUID.randomUUID().toString(), localVideo, register);
-            else register.accept(null);
+            String screenshotPath = session.logWithMedia(log4jLevel, message, Boolean.TRUE.equals(captureScreenshot), true);
             return new FileValue(screenshotPath);
         } catch (Exception e) {
             throw new BotCommandException("Error occurred: " + e.getMessage(), e);
@@ -184,20 +144,6 @@ public class LogMessage {
             default:
                 return Level.INFO;
         }
-    }
-
-    public static String generateRandomScreenshotPath(String folderPath, String logLevel) {
-        // Create prefix based on log level
-        String prefix = "info_";
-        if (logLevel.equals(LEVEL_WARN)) {
-            prefix = "warn_";
-        } else if (logLevel.equals(LEVEL_ERROR)) {
-            prefix = "error_";
-        }
-
-        String fileName = prefix + UUID.randomUUID() + ".png";
-        Path path = Paths.get(folderPath, fileName);
-        return path.toAbsolutePath().toString();
     }
 
   public String getFormattedBotUri() {

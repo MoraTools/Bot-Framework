@@ -3,7 +3,9 @@ package com.automationanywhere.botcommand.utilities.logger;
 import com.automationanywhere.botcommand.utilities.helios.HeliosConfig;
 import com.automationanywhere.botcommand.utilities.helios.CloudMediaMode;
 import com.automationanywhere.botcommand.utilities.screen.recorder.CaptureResult;
+import com.automationanywhere.botcommand.utilities.helios.ErrorMedia;
 import com.automationanywhere.botcommand.utilities.helios.HeliosAppender;
+import com.automationanywhere.botcommand.utilities.screen.CaptureScreen;
 import com.automationanywhere.botcommand.utilities.screen.recorder.EncodingMode;
 import com.automationanywhere.botcommand.utilities.screen.recorder.ScreenRecorder;
 import com.automationanywhere.toolchain.runtime.session.CloseableSessionObject;
@@ -18,6 +20,7 @@ import org.apache.logging.log4j.core.config.builder.api.LayoutComponentBuilder;
 import org.apache.logging.log4j.core.config.builder.api.LoggerComponentBuilder;
 import org.apache.logging.log4j.core.config.builder.impl.BuiltConfiguration;
 import org.apache.logging.log4j.core.config.builder.impl.DefaultConfigurationBuilder;
+import org.apache.logging.log4j.status.StatusLogger;
 
 import javax.imageio.ImageIO;
 import javax.imageio.stream.ImageInputStream;
@@ -39,6 +42,7 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -56,23 +60,27 @@ public class CustomLogger implements CloseableSessionObject {
     private final Set<Level> localRecordingLevels;
     private final CloudMediaMode cloudMediaMode;
     private final Set<String> ownedFilePaths;
-    private boolean closed;
+    private volatile boolean closed;
+    private volatile long lastContentionCheck = System.nanoTime();
+
+    private static final String LOCK_FILE = ".a360.lock";
+    private static final String CONTENTION_NOTICE = ".a360-contention";
+    private static final long CONTENTION_CHECK_NANOS = TimeUnit.SECONDS.toNanos(1);
 
     // Each Log4j manager can be shared by several sessions in this JVM.
     private static final Map<String, FileOwnership> FILE_OWNERS = new HashMap<>();
 
     private static final class FileOwnership {
+        // Closing the channel releases its lock. Null when the file system gives no lock.
         private final FileChannel channel;
-        private final FileLock lock;
         private int users = 1;
 
-        private FileOwnership(FileChannel channel, FileLock lock) {
+        private FileOwnership(FileChannel channel) {
             this.channel = channel;
-            this.lock = lock;
         }
 
         private void release() throws IOException {
-            try { lock.release(); } finally { channel.close(); }
+            if (channel != null) channel.close();
         }
     }
 
@@ -81,13 +89,7 @@ public class CustomLogger implements CloseableSessionObject {
 
     // Constructor for a single log file for all levels (no video recording)
     public CustomLogger(String loggerName, String logFilePath, int maxLogEntries) throws IOException {
-        this(loggerName, logFilePath, maxLogEntries, 0, new HashSet<>(), EncodingMode.FAST);
-    }
-
-    public CustomLogger(String loggerName, String logFilePath, int maxLogEntries,
-                        int bufferSeconds, Set<Level> recordingLevels,
-                        EncodingMode encodingMode) throws IOException {
-        this(loggerName, logFilePath, maxLogEntries, bufferSeconds, recordingLevels, encodingMode, null);
+        this(loggerName, logFilePath, maxLogEntries, 0, new HashSet<>(), EncodingMode.FAST, null);
     }
 
     /**
@@ -121,19 +123,19 @@ public class CustomLogger implements CloseableSessionObject {
 
     private void setupLoggerConfiguration(ConfigurationBuilder<BuiltConfiguration> builder) {
         builder.setConfigurationName("CustomLogger-" + loggerId);
-        builder.setPackages("com.automationanywhere.botcommand.utilities.logger,"
-                + "com.automationanywhere.botcommand.utilities.helios");
-        builder.setMonitorInterval("30");
+        builder.setPackages("com.automationanywhere.botcommand.utilities.logger");
         builder.setStatusLevel(Level.ERROR);
     }
 
     private AppenderComponentBuilder getCustomAppenderBuilder(ConfigurationBuilder<BuiltConfiguration> builder,
                                                               String appenderName,
-                                                              String filePath, int maxLogEntries) {
-        filePath = normalizedLogPath(filePath);
+                                                              String filePath, int maxLogEntries) throws IOException {
+        // Media links are relative to the folder the caller named. The writer and the lock use the real file.
+        String htmlDirectory = Paths.get(normalizedLogPath(filePath)).getParent().toString();
+        filePath = realLogPath(filePath);
         LayoutComponentBuilder layoutBuilder = builder.newLayout("CustomHTMLLayout")
                 .addAttribute("charset", "UTF-8")
-                .addAttribute("htmlDirectory", Paths.get(filePath).getParent().toString());
+                .addAttribute("htmlDirectory", htmlDirectory);
 
         // Simple sequential numbering: 1_log.html, 2_log.html, etc.
         // Active file remains as log.html
@@ -160,6 +162,12 @@ public class CustomLogger implements CloseableSessionObject {
 
     private static String normalizedLogPath(String filePath) {
         return Paths.get(filePath).toAbsolutePath().normalize().toString();
+    }
+
+    /** The key of one log file: its folder is resolved through links, so every spelling of the folder gives one key. */
+    private static String realLogPath(String filePath) throws IOException {
+        Path path = Paths.get(normalizedLogPath(filePath));
+        return path.getParent().toRealPath().resolve(path.getFileName()).toString();
     }
 
     private static synchronized BuiltConfiguration startContext(LoggerContext context,
@@ -197,15 +205,26 @@ public class CustomLogger implements CloseableSessionObject {
             shared.users++;
             return;
         }
-        FileChannel channel = FileChannel.open(ownershipSidecar(filePath, ".a360.lock"),
-                StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+        FileChannel channel = null;
         FileLock lock;
         try {
+            channel = FileChannel.open(ownershipSidecar(filePath, LOCK_FILE),
+                    StandardOpenOption.CREATE, StandardOpenOption.WRITE);
             lock = channel.tryLock();
-        } catch (OverlappingFileLockException contention) {
-            lock = null;
-        } catch (IOException | RuntimeException | Error failure) {
-            channel.close();
+        } catch (OverlappingFileLockException sameJvm) {
+            // Another spelling of this file, or another copy of this class, holds the lock inside this JVM.
+            closeQuietly(channel);
+            throw new IOException("HTML log is already open in this process: " + filePath
+                    + ". Use one path for it, or close the other logger session first.");
+        } catch (IOException unavailable) {
+            // No lock here (read-only folder, NFS without lockd): own the file in this JVM only.
+            closeQuietly(channel);
+            StatusLogger.getLogger().error("Cannot lock HTML log " + filePath
+                    + ". Another process can write it at the same time.", unavailable);
+            FILE_OWNERS.put(filePath, new FileOwnership(null));
+            return;
+        } catch (RuntimeException | Error failure) {
+            closeQuietly(channel);
             throw failure;
         }
         if (lock == null) {
@@ -213,7 +232,7 @@ public class CustomLogger implements CloseableSessionObject {
             IOException contention = new IOException("Another process owns HTML log: " + filePath
                     + ". Close its logger session before starting this session.");
             try {
-                Files.createFile(ownershipSidecar(filePath, ".a360-contention"));
+                Files.createFile(ownershipSidecar(filePath, CONTENTION_NOTICE));
             } catch (FileAlreadyExistsException alreadyReported) {
                 // One pending warning is sufficient for repeated rejected starts.
             } catch (IOException noticeFailure) {
@@ -221,7 +240,17 @@ public class CustomLogger implements CloseableSessionObject {
             }
             throw contention;
         }
-        FILE_OWNERS.put(filePath, new FileOwnership(channel, lock));
+        try {
+            // A notice left by an owner that crashed is not about this session.
+            Files.deleteIfExists(ownershipSidecar(filePath, CONTENTION_NOTICE));
+        } catch (IOException staleNoticeFailure) {
+            StatusLogger.getLogger().error("Cannot delete old HTML log contention notice: " + filePath, staleNoticeFailure);
+        }
+        FILE_OWNERS.put(filePath, new FileOwnership(channel));
+    }
+
+    private static void closeQuietly(FileChannel channel) {
+        try { if (channel != null) channel.close(); } catch (IOException ignored) { /* the first failure is the one to report */ }
     }
 
     private static synchronized void releaseFileOwnership(Set<String> filePaths) {
@@ -230,23 +259,25 @@ public class CustomLogger implements CloseableSessionObject {
             if (owner != null && --owner.users == 0) {
                 FILE_OWNERS.remove(filePath);
                 try { owner.release(); } catch (IOException failure) {
-                    org.apache.logging.log4j.status.StatusLogger.getLogger().error(
-                            "Cannot release HTML log ownership: " + filePath, failure);
+                    StatusLogger.getLogger().error("Cannot release HTML log ownership: " + filePath, failure);
                 }
             }
         }
     }
 
-    private void reportContention() {
+    /** Looks for a notice at most once per second unless forced, because every log call comes here. */
+    private void reportContention(boolean force) {
+        long now = System.nanoTime();
+        if (!force && now - lastContentionCheck < CONTENTION_CHECK_NANOS) return;
+        lastContentionCheck = now;
         for (String filePath : ownedFilePaths) {
             try {
-                if (Files.deleteIfExists(ownershipSidecar(filePath, ".a360-contention"))) {
+                if (Files.deleteIfExists(ownershipSidecar(filePath, CONTENTION_NOTICE))) {
                     HeliosAppender.writeLocalWarning(logger,
                             "Another process was rejected because this session owns HTML log: " + filePath);
                 }
             } catch (IOException failure) {
-                org.apache.logging.log4j.status.StatusLogger.getLogger().error(
-                        "Cannot read HTML log contention notice: " + filePath, failure);
+                StatusLogger.getLogger().error("Cannot read HTML log contention notice: " + filePath, failure);
             }
         }
     }
@@ -257,7 +288,6 @@ public class CustomLogger implements CloseableSessionObject {
      * keeping their relative media/variable links and every original byte.
      */
     private static void prepareLogFile(String filePath) throws IOException {
-        filePath = normalizedLogPath(filePath);
         // Another local session may be part-way through writing a complete entry.
         if (AbstractManager.hasManager(filePath)) return;
         Path path = Paths.get(filePath);
@@ -276,7 +306,8 @@ public class CustomLogger implements CloseableSessionObject {
                 return;
             }
         }
-        Pattern pattern = Pattern.compile("(\\d+)_" + Pattern.quote(path.getFileName().toString()));
+        // At most nine digits fit an int index; a longer number (for example a date) is not one of our archives.
+        Pattern pattern = Pattern.compile("(\\d{1,9})_" + Pattern.quote(path.getFileName().toString()));
         int lastIndex;
         try (Stream<Path> files = Files.list(path.getParent())) {
             lastIndex = files.map(file -> pattern.matcher(file.getFileName().toString()))
@@ -290,13 +321,7 @@ public class CustomLogger implements CloseableSessionObject {
 
     // Constructor for multiple log files based on the level (no video recording)
     public CustomLogger(String loggerName, Map<Level, String> levelFilePathMap, int maxLogEntries) throws IOException {
-        this(loggerName, levelFilePathMap, maxLogEntries, 0, new HashSet<>(), EncodingMode.FAST);
-    }
-
-    public CustomLogger(String loggerName, Map<Level, String> levelFilePathMap, int maxLogEntries,
-                        int bufferSeconds, Set<Level> recordingLevels,
-                        EncodingMode encodingMode) throws IOException {
-        this(loggerName, levelFilePathMap, maxLogEntries, bufferSeconds, recordingLevels, encodingMode, null);
+        this(loggerName, levelFilePathMap, maxLogEntries, 0, new HashSet<>(), EncodingMode.FAST, null);
     }
 
     /**
@@ -358,7 +383,7 @@ public class CustomLogger implements CloseableSessionObject {
         builder.add(builder.newRootLogger(Level.INFO));
 
         this.ownedFilePaths = new HashSet<>();
-        for (String path : levelFilePathMap.values()) ownedFilePaths.add(normalizedLogPath(path));
+        for (String path : levelFilePathMap.values()) ownedFilePaths.add(realLogPath(path));
         BuiltConfiguration config = startContext(context, builder, ownedFilePaths);
         this.loggerContext = context;
         this.logger = context.getLogger(loggerName);
@@ -388,26 +413,78 @@ public class CustomLogger implements CloseableSessionObject {
     }
 
     private ScreenRecorder startRecorder(Path directory, int seconds, EncodingMode mode) {
-        return ScreenRecorder.start(loggerId, directory, seconds, localRecordingLevels, mode, false,
+        return ScreenRecorder.start(loggerId, directory, seconds, localRecordingLevels, mode,
                 cloudMediaMode == CloudMediaMode.VIDEO);
     }
 
     public CloudMediaMode getCloudMediaMode() { return cloudMediaMode; }
 
-    public CaptureResult snapshotForError(String captureId, boolean localRequired,
-            java.util.function.Consumer<CaptureResult> register) {
-        return recorder.snapshotForError(captureId, localRequired, register);
+    public CaptureResult snapshotForError(String captureId, java.util.function.Consumer<CaptureResult> register) {
+        return recorder.snapshotForError(captureId, register);
     }
 
-    public synchronized Logger getLogger() {
-        if (!isClosed()) reportContention();
+    // Not synchronized: close() holds this monitor while it waits for Helios and the recorder, and the recorder
+    // calls back into getLogger() while it holds its own monitor.
+    public Logger getLogger() {
+        if (!isClosed()) reportContention(false);
         return logger;
     }
 
     /**
+     * Writes one entry with the media that this session gives its level: the local clip and its poster when
+     * video is recorded for the level, and the Helios ERROR media when Helios streaming is on.
+     *
+     * @param row           the entry columns; this call adds the Video and VideoPoster columns
+     * @param keepStill     the captured still also goes to the Screenshot column and stays local
+     * @param failOnCapture a failed still throws when no Helios ERROR media needs it; otherwise the entry
+     *                      is written and Helios gets the capture failure
+     * @return the still path in the Screenshot column, or an empty string
+     */
+    public String logWithMedia(Level level, Map<String, Object> row, boolean keepStill, boolean failOnCapture) {
+        boolean cloudError = level == Level.ERROR && getCloudMediaMode() != CloudMediaMode.OFF;
+        boolean localVideo = shouldRecordVideoFor(level);
+        boolean cloudVideo = cloudError && getCloudMediaMode() == CloudMediaMode.VIDEO;
+        String screenshotPath = "";
+        String videoPosterPath = "";
+        String stillFailure = null;
+        if (localVideo || cloudError || keepStill) {
+            String still = Paths.get(getScreenshotFolderPath(level), level.name().toLowerCase(java.util.Locale.ROOT)
+                    + "_" + UUID.randomUUID() + ".png").toAbsolutePath().toString();
+            try {
+                CaptureScreen.captureDesktop(still);
+                if (localVideo) videoPosterPath = still;
+                if (keepStill) screenshotPath = still;
+                if (cloudError && videoPosterPath.isEmpty()) videoPosterPath = still;
+            } catch (RuntimeException captureError) {
+                if (failOnCapture && !cloudError) throw captureError;
+                stillFailure = "captureFailed";
+            }
+        }
+        if (keepStill) row.put(CustomHTMLLayout.Columns.SCREENSHOT, screenshotPath);
+        row.put(CustomHTMLLayout.Columns.VIDEO, "");
+        row.put(CustomHTMLLayout.Columns.VIDEO_POSTER, localVideo ? videoPosterPath : "");
+        Path still = videoPosterPath.isEmpty() ? (screenshotPath.isEmpty() ? null : Paths.get(screenshotPath)) : Paths.get(videoPosterPath);
+        String captureFailure = stillFailure;
+        java.util.concurrent.atomic.AtomicBoolean registered = new java.util.concurrent.atomic.AtomicBoolean();
+        java.util.function.Consumer<CaptureResult> register = capture -> {
+            if (!registered.compareAndSet(false, true)) return;
+            if (localVideo && capture != null && capture.video != null)
+                row.put(CustomHTMLLayout.Columns.VIDEO, capture.video.toString());
+            if (cloudError) row.put(ErrorMedia.COLUMN, new ErrorMedia(still, captureFailure, capture, cloudVideo, !localVideo && !keepStill));
+            getLogger().log(level, row);
+        };
+        if (localVideo || cloudVideo) snapshotForError(UUID.randomUUID().toString(), register);
+        else register.accept(null);
+        return screenshotPath;
+    }
+
+    /**
      * Writes one entry for another package. The signature has only JDK types, so a package that loads in
-     * another class loader can call it by reflection. This call never captures the screen, records video,
-     * or copies, moves, or deletes a file.
+     * another class loader can call it by reflection. An ERROR entry gets the media of a Log Message ERROR
+     * entry without "Capture Screenshot": when Helios streaming is on, a desktop still (and the clip when ERROR
+     * video is recorded) goes to Helios; when video is recorded at ERROR, the row gets the clip and its poster.
+     * The caller's screenshot stays local. A capture failure never throws; the entry is still written.
+     * INFO and WARN entries never capture. This call never copies, moves, or deletes the caller's files.
      *
      * @param level          {@code INFO}, {@code WARN}, or {@code ERROR}, in any letter case
      * @param message        text for the Message column; may be empty
@@ -417,9 +494,9 @@ public class CustomLogger implements CloseableSessionObject {
      * @throws IllegalArgumentException if the level, the message, or a path is not valid
      * @throws IllegalStateException    if this session is closed
      */
-    public synchronized void logExternal(String level, String message, String source,
-                                         String screenshotPath, String attachmentPath) {
-        if (closed || isClosed()) throw new IllegalStateException("Logger session is closed");
+    public void logExternal(String level, String message, String source,
+                            String screenshotPath, String attachmentPath) {
+        if (closed) throw new IllegalStateException("Logger session is closed");
         Level log4jLevel;
         if ("INFO".equalsIgnoreCase(level)) log4jLevel = Level.INFO;
         else if ("WARN".equalsIgnoreCase(level)) log4jLevel = Level.WARN;
@@ -433,7 +510,8 @@ public class CustomLogger implements CloseableSessionObject {
         row.put(CustomHTMLLayout.Columns.SCREENSHOT, externalFile(screenshotPath, "Screenshot path", true));
         row.put(CustomHTMLLayout.Columns.ATTACHMENT, externalFile(attachmentPath, "Attachment path", false));
         row.put(CustomHTMLLayout.Columns.EXTERNAL, Boolean.TRUE);
-        getLogger().log(log4jLevel, row);
+        if (log4jLevel == Level.ERROR) logWithMedia(log4jLevel, row, false, false);
+        else getLogger().log(log4jLevel, row);
     }
 
     /** Returns the path when it is empty or names an existing file (an image when required); never touches the file. */
@@ -460,16 +538,6 @@ public class CustomLogger implements CloseableSessionObject {
         return localRecordingLevels.contains(level) && recorder.shouldRecordFor(level);
     }
 
-    /**
-     * Snapshots the rolling buffer and queues an async stage-2 encode. Returns the
-     * eventual mp4 path (which may not exist until the encode finishes), or null
-     * if the encode could not be queued (recorder failed, queue full, ring empty).
-     */
-    public java.nio.file.Path snapshotForError(String errorUuid) {
-        return recorder.snapshotForError(errorUuid);
-    }
-
-
     /** UUID identifying this session; useful for tests and salvage path naming. */
     public String getLoggerId() {
         return loggerId;
@@ -484,16 +552,15 @@ public class CustomLogger implements CloseableSessionObject {
             try {
                 if (heliosAppender != null) heliosAppender.finish();
             } finally {
-                try { reportContention(); } finally { loggerContext.stop(); }
+                try { reportContention(true); } finally {
+                    // The HTML file is complete when its context stops, so it can pass to another process
+                    // while the recorder drains.
+                    try { loggerContext.stop(); } finally { releaseFileOwnership(ownedFilePaths); }
+                }
             }
         } finally {
-            try {
-                // Drain recorder output before the last session releases file ownership.
-                try { recorder.close(); } finally {
-                    if (heliosAppender != null) heliosAppender.stopMedia();
-                }
-            } finally {
-                releaseFileOwnership(ownedFilePaths);
+            try { recorder.close(); } finally {
+                if (heliosAppender != null) heliosAppender.stopMedia();
             }
         }
     }

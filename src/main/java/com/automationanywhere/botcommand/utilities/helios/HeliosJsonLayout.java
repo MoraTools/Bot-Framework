@@ -11,7 +11,6 @@ import org.json.JSONObject;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
@@ -42,16 +41,6 @@ public class HeliosJsonLayout {
     private static final int MAX_VALUE_CHARS = 8192;
 
     private final AtomicReference<Level> worst = new AtomicReference<>(Level.INFO);
-    private final String defaultMachine;
-    private final String defaultUser;
-
-    public HeliosJsonLayout() { this(null, null); }
-
-    /** Omit only identity fields that match the values saved in this session's start. */
-    public HeliosJsonLayout(String machine, String user) {
-        defaultMachine = machine;
-        defaultUser = user;
-    }
 
     public String status() {
         Level level = worst.get();
@@ -106,10 +95,6 @@ public class HeliosJsonLayout {
                 .put("variablesCount", variablesCount)
                 .put("variables", variables)
                 .put("screenPath", screenPath);
-        String eventMachine = CustomHTMLLayout.machineName();
-        String eventUser = CustomHTMLLayout.userName();
-        if (!Objects.equals(eventMachine, defaultMachine)) entry.put("machine", eventMachine);
-        if (!Objects.equals(eventUser, defaultUser)) entry.put("user", eventUser);
 
         return new JSONObject()
                 .put("firstOrdinal", ordinal)

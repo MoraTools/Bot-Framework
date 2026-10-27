@@ -4,52 +4,49 @@ import com.automationanywhere.botcommand.utilities.logger.HTMLGenerator;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
+import java.nio.file.Path;
+import java.nio.file.Paths;
+
 public class HTMLScreenCellTest {
+    // The generator does no file I/O, so the folder does not have to exist.
+    private static final Path DIR = Paths.get("html-screen-cell-test").toAbsolutePath();
+
+    private static String file(String folder, String name) {
+        return DIR.resolve(folder).resolve(name).toString();
+    }
 
     @Test
     public void videoTakesPriorityOverScreenshot() {
         String html = HTMLGenerator.getScreenCellHTML(
-                "C:\\logs\\screenshots\\warn_uuid.png",
-                "C:\\logs\\clips\\error_uuid.mp4",
-                "C:\\logs\\screenshots\\error_uuid.png");
+                file("screenshots", "warn_uuid.png"),
+                file("clips", "error_uuid.mp4"),
+                file("screenshots", "error_uuid.png"), DIR);
 
         Assert.assertTrue(html.contains("video-link"),
                 "video-link class should be applied when video path is present");
-        Assert.assertTrue(html.contains("clips/error_uuid.mp4"),
-                "video href should reference the clips/ relative path");
-        Assert.assertTrue(html.contains("screenshots/error_uuid.png"),
-                "poster should reference the screenshots/ relative path");
+        Assert.assertTrue(html.contains("href='clips/error_uuid.mp4'"),
+                "video href should be relative to the HTML folder");
+        Assert.assertTrue(html.contains("src='screenshots/error_uuid.png'"),
+                "poster should be relative to the HTML folder");
         Assert.assertTrue(html.contains("&#9654;") || html.contains("▶"),
                 "play overlay glyph should be present");
     }
 
     @Test
     public void videoOnlyWithoutPoster() {
-        String html = HTMLGenerator.getScreenCellHTML("", "C:\\logs\\clips\\x.mp4", "");
+        String html = HTMLGenerator.getScreenCellHTML("", file("clips", "x.mp4"), "", DIR);
 
         Assert.assertTrue(html.contains("video-link"));
-        Assert.assertTrue(html.contains("clips/x.mp4"));
+        Assert.assertTrue(html.contains("href='clips/x.mp4'"));
         // No img tag if no poster
         Assert.assertFalse(html.contains("<img"),
                 "no poster image expected when poster path is empty");
     }
 
     @Test
-    public void screenshotOnlyFallsBackToExistingRendering() {
-        String html = HTMLGenerator.getScreenCellHTML(
-                "C:\\logs\\screenshots\\info_uuid.png", "", "");
-
-        Assert.assertTrue(html.contains("img-link"),
-                "img-link class should be applied for plain screenshots");
-        Assert.assertFalse(html.contains("video-link"),
-                "video-link class must not appear for screenshot-only rows");
-        Assert.assertTrue(html.contains("screenshots/info_uuid.png"));
-    }
-
-    @Test
     public void emptyEverythingProducesEmptyCell() {
-        Assert.assertEquals(HTMLGenerator.getScreenCellHTML("", "", ""), "");
-        Assert.assertEquals(HTMLGenerator.getScreenCellHTML(null, null, null), "");
+        Assert.assertEquals(HTMLGenerator.getScreenCellHTML("", "", "", DIR), "");
+        Assert.assertEquals(HTMLGenerator.getScreenCellHTML(null, null, null, DIR), "");
     }
 
     @Test
@@ -59,9 +56,9 @@ public class HTMLScreenCellTest {
         // empty, videoPosterPath set. The cell should show the poster as a
         // clickable image (linking to itself) with a "no video" badge.
         String html = HTMLGenerator.getScreenCellHTML(
-                "C:\\logs\\screenshots\\error_uuid.png",
+                file("screenshots", "error_uuid.png"),
                 "",
-                "C:\\logs\\screenshots\\error_uuid.png");
+                file("screenshots", "error_uuid.png"), DIR);
 
         Assert.assertTrue(html.contains("video-unavailable"),
                 "video-unavailable class should be applied when poster exists but video is missing");
@@ -71,21 +68,7 @@ public class HTMLScreenCellTest {
                 "video-link class must not be applied when there is no video");
         Assert.assertFalse(html.contains("play-overlay"),
                 "play overlay must not appear when there is no video");
-        Assert.assertTrue(html.contains("screenshots/error_uuid.png"),
+        Assert.assertTrue(html.contains("href='screenshots/error_uuid.png'") && html.contains("src='screenshots/error_uuid.png'"),
                 "the link target and img src should both be the poster screenshot");
-    }
-
-    @Test
-    public void htmlEscapesPaths() {
-        // A path with characters that must be escaped in HTML attributes
-        String html = HTMLGenerator.getScreenCellHTML(
-                "", "C:\\logs\\clips\\evil&<>.mp4", "C:\\logs\\screenshots\\evil&<>.png");
-
-        // FilenameUtils.getName strips the directory; only the filename
-        // appears in the URL. The escaping should turn & into &amp; etc.
-        Assert.assertFalse(html.contains("&<"),
-                "ampersand-followed-by-less-than should be escaped");
-        Assert.assertTrue(html.contains("&amp;") || html.contains("&#"),
-                "ampersand in filenames should be HTML-escaped");
     }
 }

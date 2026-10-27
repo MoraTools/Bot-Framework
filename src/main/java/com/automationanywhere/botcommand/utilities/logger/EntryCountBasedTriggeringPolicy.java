@@ -62,13 +62,6 @@ public class EntryCountBasedTriggeringPolicy extends AbstractTriggeringPolicy {
         return false;
     }
 
-    /**
-     * Get the current entry count
-     */
-    public int getCurrentEntryCount() {
-        return currentEntryCount.get();
-    }
-
     /** Counts completed events, independent of tables inside variable snapshots. */
     private int countExistingEntries(String filePath) {
         File file = new File(filePath);
@@ -98,11 +91,6 @@ public class EntryCountBasedTriggeringPolicy extends AbstractTriggeringPolicy {
 
         @PluginBuilderAttribute
         private int maxEntries = 1000; // Default to 1000 entries
-
-        public Builder withMaxEntries(int maxEntries) {
-            this.maxEntries = maxEntries;
-            return this;
-        }
 
         @Override
         public EntryCountBasedTriggeringPolicy build() {

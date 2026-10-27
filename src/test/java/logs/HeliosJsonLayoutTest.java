@@ -58,38 +58,18 @@ public class HeliosJsonLayoutTest {
         JSONObject envelope = new HeliosJsonLayout().toJson(event(Level.ERROR, row()), 0);
         JSONObject entry = envelope.getJSONArray("entries").getJSONObject(0);
 
-        Assert.assertEquals(entry.length(), 11, "entry field count");
+        Assert.assertEquals(entry.length(), 9, "entry field count");
         Assert.assertEquals(entry.getString("timestamp"), CustomHTMLLayout.formatTimestamp(TIMESTAMP));
         Assert.assertEquals(entry.getInt("utcOffsetMinutes"),
                 ZoneId.systemDefault().getRules().getOffset(Instant.ofEpochMilli(TIMESTAMP)).getTotalSeconds() / 60);
         Assert.assertEquals(entry.getString("level"), "ERROR");
         Assert.assertEquals(entry.getString("source"), SOURCE);
         Assert.assertEquals(entry.getString("task"), "My Task");
-        Assert.assertEquals(entry.getString("machine"), CustomHTMLLayout.machineName());
-        Assert.assertEquals(entry.getString("user"), CustomHTMLLayout.userName());
+        Assert.assertFalse(entry.has("machine") || entry.has("user"), "Machine and User come from the session start");
         Assert.assertEquals(entry.getString("message"), "hello helios");
         Assert.assertEquals(entry.getInt("variablesCount"), 2);
         // Video wins over the screenshot when both are present.
         Assert.assertEquals(entry.getString("screenPath"), "C:\\logs\\clips\\error_1.mp4");
-    }
-
-    @Test
-    public void matchingIdentityUsesTheSessionDefaultsAndMismatchesStayExplicit() {
-        String machine = CustomHTMLLayout.machineName();
-        String user = CustomHTMLLayout.userName();
-        JSONObject compact = new HeliosJsonLayout(machine, user).toJson(event(Level.INFO, row()), 0)
-                .getJSONArray("entries").getJSONObject(0);
-        Assert.assertEquals(compact.length(), 9);
-        Assert.assertFalse(compact.has("machine"));
-        Assert.assertFalse(compact.has("user"));
-        JSONObject override = new HeliosJsonLayout("different " + machine, user).toJson(event(Level.INFO, row()), 0)
-                .getJSONArray("entries").getJSONObject(0);
-        Assert.assertEquals(override.getString("machine"), machine);
-        Assert.assertFalse(override.has("user"), "each default is compared independently");
-        JSONObject both = new HeliosJsonLayout("different " + machine, "different " + user)
-                .toJson(event(Level.INFO, row()), 0).getJSONArray("entries").getJSONObject(0);
-        Assert.assertEquals(both.getString("machine"), machine);
-        Assert.assertEquals(both.getString("user"), user);
     }
 
     @Test

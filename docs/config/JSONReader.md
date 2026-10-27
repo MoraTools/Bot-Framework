@@ -66,3 +66,17 @@ Read data from a JSON source, which can be either a file or a text input, and co
 - **Description:** A dictionary containing key-value pairs extracted from the JSON data. Keys are constructed from the
   path to each value in the JSON structure, and values are stored as strings.
 - Array keys keep their zero-based index. For example, `{"x":[1,2,3]}` produces `x[0]`, `x[1]`, and `x[2]`.
+- An array inside an array adds a dot before its index. For example, `{"m":[[1,2],[3]]}` produces `m[0].[0]`,
+  `m[0].[1]`, and `m[1].[0]`. The key is `m[0].[1]`, not `m[0][1]`.
+
+More examples of keys:
+
+| JSON | Keys |
+|------|------|
+| `{"a":{"b":1}}` | `a.b` |
+| `{"x":[1,2]}` | `x[0]`, `x[1]` |
+| `{"o":[{"n":"A"}]}` | `o[0].n` |
+| `{"m":[[1,2],[3]]}` | `m[0].[0]`, `m[0].[1]`, `m[1].[0]` |
+| `{"a":[[[1]]]}` | `a[0].[0].[0]` |
+| `[{"id":1}]` (the root, or the selected node, is an array) | `[0].id` |
+| `[[1,2]]` (the root, or the selected node, is an array) | `[0].[0]`, `[0].[1]` |

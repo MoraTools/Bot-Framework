@@ -12,14 +12,18 @@ import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.FilenameUtils;
 
 import java.io.IOException;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * @author Sumit Kumar
@@ -38,6 +42,8 @@ import java.util.Map;
 public class CreateFolders {
     private static final String PATH_RELATIVE = "RELATIVE";
     private static final String PATH_ABSOLUTE = "ABSOLUTE";
+    private static final String LINK_REFUSED =
+            "Overwrite refused because of a symbolic link, junction or other reparse point: ";
 
     @Execute
     public DictionaryValue action(
@@ -106,6 +112,8 @@ public class CreateFolders {
             }
 
             boolean relative = PATH_RELATIVE.equalsIgnoreCase(pathType);
+            boolean overwrite = Boolean.TRUE.equals(overwriteExisting);
+            boolean append = Boolean.TRUE.equals(appendToExistingDictionary);
             if (relative && (baseFolderPath == null || baseFolderPath.isBlank())) {
                 throw new BotCommandException("Base folder path must not be blank");
             }
@@ -113,6 +121,7 @@ public class CreateFolders {
             Path realBasePath = relative ? resolveExistingParents(basePath) : null;
             // Validate the whole batch before overwrite can delete any folder.
             List<Path> directoryPaths = new ArrayList<>();
+            List<Path> realDirectoryPaths = new ArrayList<>();
             for (Value folderPathValue : folderPaths) {
                 String folderPath = folderPathValue.get().toString();
                 if (folderPath.isBlank()) {
@@ -128,23 +137,36 @@ public class CreateFolders {
                     if (normalizedPath.equals(basePath.normalize()) || !normalizedPath.startsWith(basePath.normalize())) {
                         throw new BotCommandException("Folder path must be inside the base folder: " + folderPath);
                     }
+                } else if (!directoryPath.isAbsolute()) {
+                    throw new BotCommandException("Absolute folder path must be a full path: " + folderPath);
                 }
                 Path realDirectoryPath = resolveExistingParents(directoryPath.toAbsolutePath());
                 if (realDirectoryPath.getParent() == null || (relative &&
                         (realDirectoryPath.equals(realBasePath) || !realDirectoryPath.startsWith(realBasePath)))) {
                     throw new BotCommandException("Folder path must not be a root, the base folder, or outside the base folder: " + folderPath);
                 }
+                if (overwrite) {
+                    for (Path otherRealPath : realDirectoryPaths) {
+                        if (realDirectoryPath.startsWith(otherRealPath) || otherRealPath.startsWith(realDirectoryPath)) {
+                            throw new BotCommandException("Folder paths must not be the same or inside each other when overwrite is on: " + folderPath);
+                        }
+                    }
+                    if (Files.exists(directoryPath)) {
+                        requireNoLinks(directoryPath);
+                    }
+                }
                 directoryPaths.add(directoryPath);
+                realDirectoryPaths.add(realDirectoryPath);
             }
 
             for (Path directoryPath : directoryPaths) {
-                if (Files.exists(directoryPath) && overwriteExisting) {
+                if (Files.exists(directoryPath) && overwrite) {
                     FileUtils.deleteDirectory(directoryPath.toFile());
                 }
 
                 Files.createDirectories(directoryPath);
                 String key = prefix + FilenameUtils.getName(directoryPath.toString()) + suffix;
-                if (appendToExistingDictionary) {
+                if (append) {
                     configDictionary.put(key, new StringValue(directoryPath.toString()));
                 }
                 returnDictionary.put(key, new StringValue(directoryPath.toString()));
@@ -152,15 +174,39 @@ public class CreateFolders {
 
             return new DictionaryValue(returnDictionary);
         } catch (Exception e) {
-            throw new BotCommandException(e.getMessage(), e);
+            throw new BotCommandException(Objects.requireNonNullElse(e.getMessage(), e.toString()), e);
         }
 
     }
 
+    // Java treats a Windows junction as a normal folder (isOther() is true), so a recursive delete would go through it.
+    private void requireNoLinks(Path folder) throws IOException {
+        Files.walkFileTree(folder, new SimpleFileVisitor<Path>() {
+            @Override
+            public FileVisitResult preVisitDirectory(Path directory, BasicFileAttributes attributes) {
+                if (attributes.isOther()) {
+                    throw new BotCommandException(LINK_REFUSED + directory);
+                }
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) {
+                if (attributes.isSymbolicLink()) {
+                    throw new BotCommandException(LINK_REFUSED + file);
+                }
+                return FileVisitResult.CONTINUE;
+            }
+        });
+    }
+
     private Path resolveExistingParents(Path path) throws IOException {
         Path existingPath = path;
-        while (!Files.exists(existingPath, LinkOption.NOFOLLOW_LINKS)) {
+        while (existingPath != null && !Files.exists(existingPath, LinkOption.NOFOLLOW_LINKS)) {
             existingPath = existingPath.getParent();
+        }
+        if (existingPath == null) {
+            throw new BotCommandException("Root of folder path does not exist: " + path);
         }
         if (!Files.isDirectory(existingPath)) {
             throw new BotCommandException("Folder path contains a file or an invalid symbolic link: " + path);

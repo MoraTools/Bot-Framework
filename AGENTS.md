@@ -1,16 +1,17 @@
 # Bot-Framework — Agent Context
 
 Open-source Automation Anywhere A360 in-bot package (github.com/A360-Tools/Bot-Framework):
-robust HTML session logging, config reading (CSV/Excel/JSON/XML), auto log deletion,
+robust HTML session logging, config reading (JSON/XML), auto log deletion,
 close-application, framework templating, and a rolling screen-recording buffer (bundled FFmpeg).
-Since 4.0.0 (author jamir-boop) it also streams logger sessions to Helios Cloud
-(`utilities/helios/`); the binding API contract lives in `../helios-cloud/plan.md`.
+It also streams logger sessions to Helios Cloud (`utilities/helios/`, author jamir-boop);
+the binding API contract lives in `../helios-cloud/plan.md`.
 
 ## Build
 
 JDK 11 only (`gradle.properties` → `org.gradle.java.home`). `./gradlew clean test shadowJar --console=plain`.
-On Linux 19 tests fail for Windows-only reasons (bundled ffmpeg.exe, file-age semantics); the Windows build
-host is the acceptance environment. Output: `build/libs/A360BotFramework-<version>.jar`.
+On Linux 14 of 328 tests fail and 4 are skipped for Windows-only reasons (bundled ffmpeg.exe, file-age semantics,
+desktop screen capture, junctions, drive letters); the Windows build host is the acceptance environment.
+Output: `build/libs/A360BotFramework-<version>.jar`.
 
 ## Package version
 

@@ -84,8 +84,6 @@ final class HeliosJournal implements AutoCloseable {
     }
 
     /** Peeks a batch or the closing record. Only acknowledge() advances the delivery cursor. */
-    synchronized JSONObject next() throws IOException { return next(BATCH_ENTRIES); }
-
     synchronized JSONObject next(int limit) throws IOException {
         seek(cursor);
         JSONArray entries = new JSONArray();

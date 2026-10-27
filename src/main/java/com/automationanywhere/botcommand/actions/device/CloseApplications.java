@@ -18,7 +18,7 @@ import java.util.List;
 @BotCommand
 @CommandPkg(label = "Close Applications",
         node_label = "in list {{killTaskList}}",
-        description = "Sends close and then terminate request to running applications in list",
+        description = "Terminates the listed applications at once. Unsaved work is lost.",
         icon = "close.svg", name = "device_close_application",
         group_label = "Device",
         documentation_url = "https://github.com/A360-Tools/Bot-Framework/blob/main/docs/device/CloseApplications.md"
@@ -44,8 +44,7 @@ public class CloseApplications {
             for (Value value : killTaskList) {
                 processes.add(value.get().toString().trim());
             }
-            TaskKiller.killProcesses(processes, false);
-            TaskKiller.killProcesses(processes, true);
+            TaskKiller.killProcesses(processes);
         } catch (Exception e) {
             throw new BotCommandException("Error occurred while terminating applications: " + e.getMessage(), e);
         }

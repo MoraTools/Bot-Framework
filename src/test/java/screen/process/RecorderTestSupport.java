@@ -1,11 +1,17 @@
 package screen.process;
 
+import com.automationanywhere.botcommand.utilities.screen.recorder.EncodingMode;
 import com.automationanywhere.botcommand.utilities.screen.recorder.FfmpegBinary;
+import com.automationanywhere.botcommand.utilities.screen.recorder.SessionMeta;
+import org.testng.SkipException;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Comparator;
 import java.util.stream.Stream;
 
@@ -111,7 +117,8 @@ public final class RecorderTestSupport {
                 + " (last seen: " + count + ")");
     }
 
-    private static long countByExt(Path dir, String ext) {
+    /** Counts the files in {@code dir} whose name ends in {@code ext}, in any letter case; 0 if the dir is gone. */
+    public static long countByExt(Path dir, String ext) {
         if (!Files.isDirectory(dir)) {
             return 0;
         }
@@ -124,6 +131,21 @@ public final class RecorderTestSupport {
         }
     }
 
+    /** Sleeps until just after the next 1-second boundary, so the snapshots that follow share one dedup chunk. */
+    public static void awaitNextChunk() throws InterruptedException {
+        Thread.sleep(1000 - System.currentTimeMillis() % 1000 + 5);
+    }
+
+    /** Points the Helios media outbox at {@code directory} until the returned handle is closed. */
+    public static AutoCloseable useOutbox(Path directory) {
+        String previous = System.getProperty("helios.outbox.directory");
+        System.setProperty("helios.outbox.directory", directory.toString());
+        return () -> {
+            if (previous == null) System.clearProperty("helios.outbox.directory");
+            else System.setProperty("helios.outbox.directory", previous);
+        };
+    }
+
     public static void deleteRecursivelyQuietly(Path root) {
         if (root == null || !Files.exists(root)) return;
         try (Stream<Path> walk = Files.walk(root)) {
@@ -132,5 +154,47 @@ public final class RecorderTestSupport {
             });
         } catch (IOException ignored) {
         }
+    }
+
+    /**
+     * Publishes a flat segment list the way FFmpeg's segment muxer does: the names are written to
+     * {@code list.txt.tmp} and renamed over {@code list.txt}, so a reader never sees a torn list.
+     */
+    public static void publishSegmentList(Path ringDir, String... names) throws IOException {
+        Path temporary = ringDir.resolve("list.txt.tmp");
+        Files.writeString(temporary, names.length == 0 ? "" : String.join("\n", names) + "\n");
+        Files.move(temporary, ringDir.resolve("list.txt"), StandardCopyOption.ATOMIC_MOVE);
+    }
+
+    /** Skips the calling test when there is no POSIX shell to stand in for ffmpeg. */
+    public static void requireShell() {
+        if (!Files.isExecutable(Path.of("/bin/sh"))) throw new SkipException("The ffmpeg stub needs a POSIX shell");
+    }
+
+    /**
+     * Writes an executable shell script that stands in for ffmpeg. Its last argument, the output file, is
+     * available as {@code $last}.
+     */
+    public static Path shellStub(Path file, String body) throws IOException {
+        Files.writeString(file, "#!/bin/sh\nfor last; do :; done\n" + body);
+        Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rwx------"));
+        return file;
+    }
+
+    /** Quotes a path for use inside {@link #shellStub}. */
+    public static String shellQuote(Path path) {
+        return "'" + path.toString().replace("'", "'\\''") + "'";
+    }
+
+    /**
+     * Creates {@code <root>/sessions/<name>} the way a crashed recorder leaves it: a session.meta whose
+     * owner is not running and the session.active marker.
+     */
+    public static Path deadSession(Path root, Path logs, String name, int bufferSeconds) throws IOException {
+        Path session = Files.createDirectories(root.resolve("sessions").resolve(name));
+        new SessionMeta(name, logs.toString(), bufferSeconds, Instant.now(), Long.MAX_VALUE,
+                EncodingMode.FAST).write(session.resolve("session.meta"));
+        Files.createFile(session.resolve("session.active"));
+        return session;
     }
 }

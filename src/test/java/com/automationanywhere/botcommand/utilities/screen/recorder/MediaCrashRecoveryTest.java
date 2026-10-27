@@ -3,23 +3,29 @@ package com.automationanywhere.botcommand.utilities.screen.recorder;
 import org.json.JSONObject;
 import org.testng.Assert;
 import org.testng.SkipException;
+import org.testng.annotations.AfterClass;
 import org.testng.annotations.Test;
+import screen.process.RecorderTestSupport;
+import support.TempDirectories;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
-import org.apache.logging.log4j.Level;
 
 public class MediaCrashRecoveryTest {
+    private final TempDirectories temp = new TempDirectories();
+
+    @AfterClass(alwaysRun = true)
+    public void deleteTemporaryFolders() { temp.deleteAll(); }
+
     @Test public void exactScratchRecoversCloudBytesBeforeRemovalAndExistingTargetDoesNotMeanReady() throws Exception {
         Path ffmpeg = Path.of("/usr/bin/ffmpeg");
         if (!Files.isExecutable(ffmpeg)) throw new SkipException("Linux synthetic finalizer check requires host FFmpeg");
-        Path appData = Files.createTempDirectory("media-crash-recorder");
-        Path outbox = Files.createTempDirectory("media-crash-outbox");
+        Path appData = temp.create("media-crash-recorder");
+        Path outbox = temp.create("media-crash-outbox");
         Path directory = Files.createDirectories(outbox.resolve("media/partition"));
-        Path logs = Files.createTempDirectory("media-crash-logs");
+        Path logs = temp.create("media-crash-logs");
         String captureId = UUID.randomUUID().toString();
         String loggerId = UUID.randomUUID().toString();
         Path session = appData.resolve("sessions").resolve(loggerId);
@@ -31,21 +37,16 @@ public class MediaCrashRecoveryTest {
                 scratch.resolve("1.mov").toString()).redirectError(ProcessBuilder.Redirect.INHERIT).start();
         Assert.assertTrue(source.waitFor(10, TimeUnit.SECONDS));
         Assert.assertEquals(source.exitValue(), 0);
-        new SessionMeta(loggerId, logs.toString(), 30, Set.of(Level.ERROR), Instant.now(), "4.5.0", Long.MAX_VALUE, EncodingMode.FAST)
+        new SessionMeta(loggerId, logs.toString(), 30, Instant.now(), Long.MAX_VALUE, EncodingMode.FAST)
                 .write(session.resolve("session.meta"));
         Files.createFile(session.resolve("session.active"));
         Files.writeString(scratch.resolve("capture.json"), new JSONObject().put("captureId", captureId)
-                .put("target", target.toString()).put("localRequired", true).put("cloudOnly", false).toString());
+                .put("target", target.toString()).toString());
         Path manifest = directory.resolve(loggerId + "-0-video.json");
         Files.writeString(manifest, new JSONObject().put("captureId", captureId).put("source", target.toString())
                 .put("kind", "video").put("state", "pending").put("completed", false).put("reserved", 0).toString());
-        String previous = System.getProperty("helios.outbox.directory");
-        try {
-            System.setProperty("helios.outbox.directory", outbox.toString());
-            CrashSweep.sweepForTest(appData, ffmpeg);
-        } finally {
-            if (previous == null) System.clearProperty("helios.outbox.directory");
-            else System.setProperty("helios.outbox.directory", previous);
+        try (AutoCloseable outboxProperty = RecorderTestSupport.useOutbox(outbox)) {
+            CrashSweep.sweep(appData, ffmpeg);
         }
         JSONObject completed = new JSONObject(Files.readString(manifest));
         Assert.assertTrue(completed.getBoolean("completed"));

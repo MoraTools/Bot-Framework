@@ -12,8 +12,6 @@ public final class CaptureResult {
     public volatile String unavailableReason;
     public volatile String mediaFailure;
     volatile boolean mediaManaged;
-    public final java.util.concurrent.atomic.AtomicBoolean localRequired = new java.util.concurrent.atomic.AtomicBoolean();
-    volatile boolean cloudScratchReserved;
 
     CaptureResult(String captureId, Path video, Path scratch, String reason) {
         this.captureId = captureId;

@@ -28,6 +28,11 @@ import java.util.stream.Stream;
 
 /** One background sender. Journals survive timeouts, rejected requests and runner restarts. */
 public final class HeliosSink {
+    static final String DELAY_WARNING = "Helios delivery was delayed. Saved entries retry from the disk journal.";
+    static final String INVALID_URL = "Invalid Helios URL. Use an http or https URL with a host. "
+            + "HTML logging continues without cloud logs.";
+    static final String STREAMS_WARNING = "Helios did not confirm separate logger streams. Update Helios; "
+            + "saved entries remain on disk for later delivery.";
     public static final String KEY_HEADER = "X-Helios-Ingest-Key";
     private static final Duration TIMEOUT = Duration.ofSeconds(10);
     private static final DateTimeFormatter LOCAL_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
@@ -42,22 +47,23 @@ public final class HeliosSink {
     private volatile boolean delivered;
     private volatile boolean stopping;
 
-    public HeliosSink(HeliosConfig config, Path root, Consumer<String> warning) throws Exception {
-        this(config, root, warning, UUID.randomUUID().toString());
-    }
-
     public HeliosSink(HeliosConfig config, Path root, Consumer<String> warning, String loggerSessionId) throws Exception {
         this.config = config;
         this.warning = warning;
+        try {
+            URI destination = URI.create(config.baseUrl);
+            if (!("http".equalsIgnoreCase(destination.getScheme()) || "https".equalsIgnoreCase(destination.getScheme()))
+                    || destination.getHost() == null) throw new IllegalArgumentException();
+        } catch (IllegalArgumentException invalid) {
+            // Fail before the journal: its folder is named by the URL, so a corrected URL would never replay it.
+            throw new IllegalArgumentException(INVALID_URL);
+        }
         HttpClient.Builder builder = HttpClient.newBuilder().connectTimeout(TIMEOUT);
         if (config.proxySelector != null) builder.proxy(config.proxySelector);
         http = builder.build();
         // Partition by destination and credential without persisting the credential itself.
-        byte[] digest = MessageDigest.getInstance("SHA-256")
-                .digest((config.baseUrl + "\0" + config.ingestKey).getBytes(StandardCharsets.UTF_8));
-        StringBuilder bucket = new StringBuilder();
-        for (byte value : digest) bucket.append(String.format("%02x", value));
-        Path directory = root.resolve(bucket.toString());
+        Path directory = root.resolve(hex(MessageDigest.getInstance("SHA-256")
+                .digest((config.baseUrl + "\0" + config.ingestKey).getBytes(StandardCharsets.UTF_8))));
         Files.createDirectories(directory);
         if (Files.getFileStore(directory).supportsFileAttributeView("posix"))
             Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwx------"));
@@ -137,7 +143,7 @@ public final class HeliosSink {
                     previous.journal.close();
                     previous = null;
                 }
-                if (delivered && previous == null && recovery.isEmpty()) break;
+                if ((delivered || closing && current.refused) && previous == null && recovery.isEmpty()) break;
                 Thread.sleep(100);
             }
         } catch (InterruptedException interrupted) {
@@ -156,7 +162,6 @@ public final class HeliosSink {
         long retryAt;
         long firstPendingAt;
         int failures;
-        boolean sessionIdentity;
         boolean refused;
         boolean replayed;
         int batchEntries = HeliosJournal.BATCH_ENTRIES;
@@ -168,32 +173,28 @@ public final class HeliosSink {
             if (refused || System.currentTimeMillis() < retryAt) return false;
             try {
                 if (sessionId == null) {
-                    String reply = post("/api/ingest/sessions", journal.start);
-                    JSONObject response;
+                    JSONObject response = new JSONObject(post("/api/ingest/sessions", journal.start));
+                    String id = response.getString("sessionId");
+                    String streamId = UUID.fromString(id).toString();
+                    // A session ID that is not a canonical UUID is a bad reply, so it retries; only the stream fields refuse.
+                    if (!streamId.equalsIgnoreCase(id)) throw new IOException("Invalid session response");
                     try {
-                        response = new JSONObject(reply);
-                        String id = response.getString("sessionId");
-                        String streamId = UUID.fromString(id).toString();
-                        if (journal.start.has("loggerSessionId")) {
-                            String execution = response.getString("executionSessionId");
-                            String executionSessionId = UUID.fromString(execution).toString();
-                            String savedExecutionId = journal.start.getString("executionId");
-                            // Helios returns its stored execution ID, limited to 256 characters.
-                            if (!streamId.equalsIgnoreCase(id) || !executionSessionId.equalsIgnoreCase(execution)
-                                    || streamId.equals(executionSessionId)
-                                    || !savedExecutionId.substring(0, Math.min(savedExecutionId.length(), 256))
-                                            .equals(response.getString("executionId")))
-                                throw new IllegalArgumentException("Invalid stream response");
-                        }
-                        sessionId = streamId;
-                    } catch (RuntimeException unsupported) {
-                        if (!journal.start.has("loggerSessionId")) throw unsupported;
+                        String execution = response.getString("executionSessionId");
+                        String executionSessionId = UUID.fromString(execution).toString();
+                        String savedExecutionId = journal.start.getString("executionId");
+                        // Helios returns its stored execution ID, limited to 256 characters.
+                        if (!executionSessionId.equalsIgnoreCase(execution)
+                                || streamId.equals(executionSessionId)
+                                || !savedExecutionId.substring(0, Math.min(savedExecutionId.length(), 256))
+                                        .equals(response.getString("executionId")))
+                            throw new IllegalArgumentException("Invalid stream response");
+                    } catch (RuntimeException unconfirmed) {
+                        // A valid session reply without separate streams will not change on retry.
                         refused = true;
-                        warning.accept("Helios did not confirm separate logger streams. Update Helios; "
-                                + "saved entries remain on disk for later delivery.");
+                        warning.accept(STREAMS_WARNING);
                         return false;
                     }
-                    sessionIdentity = Boolean.TRUE.equals(response.opt("sessionIdentity"));
+                    sessionId = streamId;
                     try { if (media != null) media.session(journal.path.getFileName().toString(), sessionId, response.optJSONObject("media")); }
                     catch (IOException mediaFailure) { warning.accept("Media session state could not be saved. JSON delivery continues; saved media is retained."); }
                 }
@@ -215,14 +216,6 @@ public final class HeliosSink {
                     JSONObject payload = new JSONObject(body.toString());
                     payload.remove("journalOffset");
                     payload.remove("journalFull");
-                    if (!sessionIdentity) {
-                        // Recover from this journal's identity, never the current runner's config.
-                        for (int index = 0; index < entries.length(); index++) {
-                            JSONObject entry = payload.getJSONArray("entries").getJSONObject(index);
-                            if (!entry.has("machine")) entry.put("machine", journal.start.optString("machine", ""));
-                            if (!entry.has("user")) entry.put("user", journal.start.optString("user", ""));
-                        }
-                    }
                     JSONObject receipt = new JSONObject(post(path + "/entries", payload));
                     int count = entries.length();
                     if (receipt.getInt("accepted") < 0 || receipt.getInt("duplicates") < 0
@@ -235,14 +228,7 @@ public final class HeliosSink {
                     pending = null;
                     firstPendingAt = 0;
                 } else {
-                    String response = post(path + "/end", body);
-                    // An older server's 204 is not proof of delivery: keep the journal.
-                    if (response.isEmpty()) {
-                        refused = true;
-                        warning.accept("The server did not verify delivery. Update Helios; the journal was retained.");
-                        return false;
-                    }
-                    JSONObject receipt = new JSONObject(response);
+                    JSONObject receipt = new JSONObject(post(path + "/end", body));
                     if (!receipt.getBoolean("complete")
                             || receipt.getInt("storedEntries") != body.getInt("expectedEntries"))
                         throw new IOException("Invalid closing receipt");
@@ -251,7 +237,10 @@ public final class HeliosSink {
                         media.session(journal.path.getFileName().toString(), sessionId, null);
                         media.acknowledge(journal.path.getFileName().toString(), 0, body.getInt("expectedEntries"));
                     }
-                    journal.deleteVerified();
+                    try { journal.deleteVerified(); }
+                    catch (IOException retained) {
+                        warning.accept("Helios verified delivery, but the disk journal could not be deleted. It was retained.");
+                    }
                     return true;
                 }
                 failures = 0;
@@ -296,13 +285,27 @@ public final class HeliosSink {
         }
 
         private void delay(long serverDelay) {
-            warning.accept("Helios delivery was delayed. Saved entries retry from the disk journal.");
-            long backoff = Math.min(30_000L, 1000L << failures);
+            warning.accept(DELAY_WARNING);
+            retryAt = retryAt(failures, serverDelay);
             failures = Math.min(failures + 1, 5);
-            long now = System.currentTimeMillis();
-            long delay = Math.max(serverDelay, backoff + ThreadLocalRandom.current().nextLong(251));
-            retryAt = now + Math.min(delay, Long.MAX_VALUE - now);
         }
+    }
+
+    static long retryAt(int failures, long serverDelay) {
+        long now = System.currentTimeMillis();
+        long delay = Math.max(serverDelay, Math.min(30_000L, 1000L << failures) + ThreadLocalRandom.current().nextLong(251));
+        return now + Math.min(delay, Long.MAX_VALUE - now);
+    }
+
+    static String hex(byte[] bytes) {
+        StringBuilder result = new StringBuilder(bytes.length * 2);
+        for (byte value : bytes) result.append(String.format("%02x", value));
+        return result.toString();
+    }
+
+    static Path outboxRoot() {
+        return Path.of(System.getProperty("helios.outbox.directory",
+                Path.of(System.getProperty("user.home"), ".helios", "outbox").toString()));
     }
 
     private String post(String path, JSONObject body) throws IOException, InterruptedException {

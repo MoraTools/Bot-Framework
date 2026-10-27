@@ -18,17 +18,13 @@ public class TaskKiller {
     private static final Logger LOGGER = LogManager.getLogger(TaskKiller.class);
     private static final long PROCESS_EXIT_TIMEOUT_SECONDS = 30;
 
-    public static void killProcesses(List<String> processNames, boolean forceKill) {
+    public static void killProcesses(List<String> processNames) {
         try {
             for (String processName : processNames) {
                 List<ProcessHandle> matchingProcesses = findAllByCommand(processName);
                 for (ProcessHandle processHandle : matchingProcesses) {
                     try {
-                        if (forceKill) {
-                            processHandle.destroyForcibly();
-                        } else {
-                            processHandle.destroy();
-                        }
+                        processHandle.destroyForcibly();
                         processHandle.onExit().get(PROCESS_EXIT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
                     } catch (Exception ex) {
                         LOGGER.warn("Failed to terminate process '{}': {}", processName, ex.getMessage());

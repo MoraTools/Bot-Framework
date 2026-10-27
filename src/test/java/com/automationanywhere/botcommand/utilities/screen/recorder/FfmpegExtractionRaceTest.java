@@ -4,13 +4,14 @@ import org.apache.logging.log4j.LogManager;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 import screen.process.RecorderTestSupport;
+import support.ChildJvm;
+import support.Sha256;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -58,16 +59,11 @@ public class FfmpegExtractionRaceTest {
         Path root = Files.createTempDirectory("ffmpeg-process-race-");
         List<Process> children = new ArrayList<>();
         try {
-            List<String> classpath = new ArrayList<>();
-            for (Class<?> type : new Class<?>[] { FfmpegExtractionRaceTest.class, FfmpegBinary.class, LogManager.class, Assert.class })
-                classpath.add(Path.of(type.getProtectionDomain().getCodeSource().getLocation().toURI()).toString());
+            List<String> classpath = ChildJvm.classPath(FfmpegExtractionRaceTest.class, FfmpegBinary.class, LogManager.class, Assert.class);
             java.net.URL resource = FfmpegBinary.class.getResource("/ffmpeg/ffmpeg.exe");
             if (resource.getProtocol().equals("file")) classpath.add(Path.of(resource.toURI()).getParent().getParent().toString());
-            Path executable = Path.of(System.getProperty("java.home"), "bin",
-                    System.getProperty("os.name").startsWith("Windows") ? "java.exe" : "java");
             for (int i = 0; i < 4; i++) {
-                Process child = new ProcessBuilder(executable.toString(), "-cp", String.join(java.io.File.pathSeparator, classpath),
-                        FfmpegExtractionRaceTest.class.getName(), root.toString())
+                Process child = new ProcessBuilder(ChildJvm.command(FfmpegExtractionRaceTest.class, classpath, List.of(), root.toString()))
                         .redirectError(ProcessBuilder.Redirect.INHERIT).start();
                 children.add(child);
                 Assert.assertEquals(new BufferedReader(new InputStreamReader(child.getInputStream())).readLine(), "ready");
@@ -92,6 +88,59 @@ public class FfmpegExtractionRaceTest {
         }
     }
 
+    @Test
+    public void aWrongCachedHashIsReplacedAndAFixedTemporaryCopyIsReclaimed() throws Exception {
+        Path root = Files.createTempDirectory("ffmpeg-stale-copy-");
+        try {
+            Path cache = Files.createDirectories(root.resolve("ffmpeg").resolve(FfmpegBinary.BUNDLED_HASH_PREFIX));
+            Path target = Files.writeString(cache.resolve("ffmpeg.exe"), "wrong binary");
+            Path temporary = Files.writeString(cache.resolve("ffmpeg.exe.tmp"), "copy left by a killed process");
+
+            Assert.assertEquals(locateAt(root), target);
+
+            assertHash(target);
+            Assert.assertFalse(Files.exists(temporary), "the stale extraction copy must be replaced, not left in the cache");
+        } finally { RecorderTestSupport.deleteRecursivelyQuietly(root); }
+    }
+
+    @Test
+    public void aFailedTemporaryDeleteDoesNotHideTheExtractionFailure() throws Exception {
+        Path root = Files.createTempDirectory("ffmpeg-delete-failure-");
+        SecurityManager previous = System.getSecurityManager();
+        Thread testThread = Thread.currentThread();
+        try {
+            System.setSecurityManager(new SecurityManager() {
+                boolean failed;
+                boolean replacing;
+                @Override public void checkPermission(java.security.Permission permission) { }
+                @Override public void checkRead(String file) {
+                    if (Thread.currentThread() == testThread && file.startsWith(root.toString()) && file.endsWith(".tmp") && !replacing) {
+                        failed = true;
+                        throw new SecurityException("primary extraction failure");
+                    }
+                }
+                @Override public void checkDelete(String file) {
+                    if (Thread.currentThread() != testThread || !failed || replacing || !file.endsWith(".tmp")) return;
+                    replacing = true;
+                    try {
+                        // Simulate a delete that fails with IOException, without file-lock semantics specific to Windows.
+                        Path temporary = Path.of(file);
+                        Files.deleteIfExists(temporary);
+                        Files.createDirectory(temporary);
+                        Files.writeString(temporary.resolve("held"), "cannot delete a nonempty directory");
+                    } catch (java.io.IOException error) { throw new AssertionError(error); }
+                }
+            });
+            java.lang.reflect.InvocationTargetException failure = Assert.expectThrows(
+                    java.lang.reflect.InvocationTargetException.class, () -> locateAt(root));
+            Assert.assertTrue(failure.getCause() instanceof SecurityException, failure.toString());
+            Assert.assertEquals(failure.getCause().getMessage(), "primary extraction failure");
+        } finally {
+            System.setSecurityManager(previous);
+            RecorderTestSupport.deleteRecursivelyQuietly(root);
+        }
+    }
+
     private static Path locateAt(Path root) throws Exception {
         Method method = FfmpegBinary.class.getDeclaredMethod("locateAt", Path.class);
         method.setAccessible(true);
@@ -99,10 +148,7 @@ public class FfmpegExtractionRaceTest {
     }
 
     private static void assertHash(Path target) throws Exception {
-        byte[] bytes = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(target));
-        StringBuilder hash = new StringBuilder();
-        for (byte value : bytes) hash.append(String.format(java.util.Locale.ROOT, "%02x", value));
-        Assert.assertEquals(hash.toString(), FfmpegBinary.BUNDLED_SHA256);
+        Assert.assertEquals(Sha256.hex(target), FfmpegBinary.BUNDLED_SHA256);
     }
 
     public static void main(String[] args) throws Exception {

@@ -1,7 +1,5 @@
 # Log Message
 
-Version 5.0.0.
-
 ## Overview
 `Log Message` records a message to the session log file and optionally captures a screenshot, enriching log diagnostics. If the parent logger session has screen recording enabled for this entry's log level, the rolling video buffer is also finalized into an MP4 placed next to the log, and a still image of the desktop is captured to serve as the HTML video preview thumbnail.
 
@@ -34,24 +32,19 @@ Version 5.0.0.
 - **Description:** Select bot variables with the native checkboxes when "Log variable values" is set to "Yes". The selector supports String, Number, Datetime, Boolean, List, Dictionary, Record, Table, and File variables. Credential, Any, Session, Window, and Form variables are excluded.
 - Use **Custom** selection for complex types. Their **By type** labels can be blank because of an A360 editor limit. Custom selection shows the variable names and icons.
 - "No", a null selection, or an empty selection produces no variable output.
-
-## Migration from 4.x
-
-Version 5.0.0 removes the manual **Log following variables** NAME/VALUE list and its custom labels. First, record each old NAME/VALUE mapping. Switch an isolated copy of the bot or action to 5.0.0, then select the same actual bot variables in **Custom** selection. Save, reopen, and test the copy before production use. Manual selections are not moved automatically. Existing checkbox selections stay valid.
-
-Keep the original bot pinned to the older package until the tested copy is ready. That bot keeps the old behavior, and the 4.5.4 JAR remains available.
+- A Credential value inside a List, Dictionary, Record or Table is shown as `********` in the HTML log and in Helios.
 
 ## Local HTML output
 
 The table has six columns: Datetime, Level, Source, Message, Variables, and Screen. Machine and User appear once in the sticky session header above it.
 
-The viewer CSS and JavaScript are minified during the package build. Entry markup is compact. Message text, whitespace markers, variable values, and media links keep their full content.
+The readable viewer is `src/main/resources/templates/log.html`, and the package ships it unchanged. Entry markup is compact. Message text, whitespace markers, variable values, and media links keep their full content.
 
-Each message is a complete entry in the HTML log. When variable logging is enabled, the **Variables** button opens a shared dialog to show the saved values, including nested lists, dictionaries, records, and tables. Values are saved when the message is logged. Each snapshot is compressed in the HTML and decoded only when opened. This requires JavaScript and gzip `DecompressionStream` support in the browser. Messages stay readable without JavaScript. No separate variable HTML file is created, and local values are not capped by the Helios limits.
+Each message is a complete entry in the HTML log. When variable logging is enabled, the **Variables** button opens a shared dialog to show the saved values, including nested lists, dictionaries, records, and tables. Values are saved when the message is logged. Each snapshot is compressed in the HTML and decoded only when opened. This requires JavaScript and gzip `DecompressionStream` support in the browser. Messages stay readable without JavaScript. A message longer than 5 lines shows its first 5 lines, and the last visible line fades. **Show full message** under it opens the whole text in a dialog. The HTML file keeps the full text. Without JavaScript, and in print, every line shows. No separate variable HTML file is created, and local values are not capped by the Helios limits.
 
 Screenshots and recordings stay in separate files. Each HTML file links to the actual media folder. Links use relative paths when possible, or file URIs for different Windows drives. A missing media file does not prevent reading the message or variables. Copy `screenshots/` and `clips/` with the HTML to retain media access. Refresh an open log to see later entries. Visible whitespace markers keep the original spaces, tabs, and line breaks when copied. Unset scalar values show `NULL`. Timestamps use English month names and keep the local numeric timezone offset.
 
-One process can own each HTML output file. A second process that uses the same file is rejected before migration or append. The owner writes a local warning on its next log entry or when closed. This warning does not create a Helios entry or media capture. Sessions in the same process can share an output file. Ownership ends after the last session closes.
+One process can own each HTML output file. The lock is the file `<log>.a360.lock` beside the log (for example `log.html.a360.lock`), and it stays on disk after the session ends. A second process that uses the same file is rejected before migration or append, and leaves the notice file `<log>.a360-contention`. Do not delete either file while a bot that uses the log runs. When it logs, the owner looks for the notice at most once per second, and always when closed. It deletes the notice and writes one local `WARN`: `Another process was rejected because this session owns HTML log: <path>`. This warning does not create a Helios entry, advance the stream ordinal, change the session result, or trigger media capture. Sessions in the same process can share an output file. Ownership ends after the last session closes. See [Start Logger Session](StartLoggerSession.md#log-file-path) for the start errors.
 
 ## Helios Cloud streaming
 

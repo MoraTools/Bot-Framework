@@ -39,6 +39,9 @@ public final class ClipFinalizer {
 
     private static final int ENCODE_TIMEOUT_SECONDS = 120;
 
+    /** The flat segment list: FFmpeg's ring list in {@code ring/} and our copy of it in a scratch folder. */
+    static final String MANIFEST = "list.txt";
+
     private ClipFinalizer() {
     }
 
@@ -54,17 +57,11 @@ public final class ClipFinalizer {
     public static void encodeSegmentsToMp4(Path ffmpegExe, Path segmentsDir, Path targetMp4,
                                            EncodingMode mode)
             throws IOException, InterruptedException {
-        encodeSegmentsToMp4(ffmpegExe, segmentsDir, targetMp4, mode, Long.MAX_VALUE);
-    }
-
-    public static void encodeSegmentsToMp4(Path ffmpegExe, Path segmentsDir, Path targetMp4,
-            EncodingMode mode, long maximumBytes) throws IOException, InterruptedException {
-        encodeSegmentsToMp4(ffmpegExe, segmentsDir, targetMp4, mode, maximumBytes,
-                segmentsInOrder(segmentsDir));
+        encodeSegmentsToMp4(ffmpegExe, segmentsDir, targetMp4, mode, segmentsInOrder(segmentsDir));
     }
 
     static void encodeSegmentsToMp4(Path ffmpegExe, Path segmentsDir, Path targetMp4,
-            EncodingMode mode, long maximumBytes, List<Path> segments) throws IOException, InterruptedException {
+            EncodingMode mode, List<Path> segments) throws IOException, InterruptedException {
         if (segments.isEmpty()) {
             throw new IOException("No .mov segments to encode in " + segmentsDir);
         }
@@ -76,75 +73,56 @@ public final class ClipFinalizer {
         Files.deleteIfExists(tmpOut);
 
         String[] cmd = buildEncodeCommand(ffmpegExe, concatList, tmpOut, mode);
-        if (maximumBytes != Long.MAX_VALUE) {
-            List<String> bounded = new ArrayList<>(Arrays.asList(cmd));
-            bounded.add(bounded.size() - 1, "-fs");
-            bounded.add(bounded.size() - 1, Long.toString(maximumBytes + 1));
-            cmd = bounded.toArray(new String[0]);
-        }
 
+        // A file, not a pipe: a failing encode can write more than the OS pipe buffer and then block.
+        Path output = segmentsDir.resolve("ffmpeg-output.txt");
         Process process = new ProcessBuilder(cmd)
                 .redirectErrorStream(true)
+                .redirectOutput(output.toFile())
                 .start();
-
-        // ffmpeg's combined stdout/stderr must be drained continuously: with
-        // -loglevel error normal runs are quiet, but a failing encode can emit
-        // more than the OS pipe buffer (~64 KB on Windows), at which point the
-        // ffmpeg writer blocks and waitFor never sees the process exit until
-        // the timeout fires. Drain on a background thread; capture the first
-        // few lines for error reporting.
-        OutputCapture capture = new OutputCapture();
-        Thread drainer = new Thread(
-                () -> drainInto(process.getInputStream(), capture),
-                "a360-clip-encoder-drain");
-        drainer.setDaemon(true);
-        drainer.start();
 
         int exitCode;
         try {
             boolean done = process.waitFor(ENCODE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             if (!done) {
-                process.destroyForcibly();
-                joinQuietly(drainer, 500);
+                kill(process);
                 throw new IOException("ffmpeg encode timed out after "
                         + ENCODE_TIMEOUT_SECONDS + " s for " + targetMp4
-                        + capture.suffix());
+                        + outputHead(output));
             }
             exitCode = process.exitValue();
         } catch (InterruptedException e) {
-            process.destroyForcibly();
-            joinQuietly(drainer, 500);
+            kill(process);
             Thread.currentThread().interrupt();
             throw e;
         }
 
-        // Process has exited; drainer should finish promptly. Bound the wait
-        // so a stuck reader can't pin this thread.
-        joinQuietly(drainer, 1000);
-
         if (exitCode != 0) {
             throw new IOException("ffmpeg encode exit code " + exitCode
-                    + " for " + targetMp4 + capture.suffix());
+                    + " for " + targetMp4 + outputHead(output));
         }
 
         if (!Files.exists(tmpOut) || Files.size(tmpOut) == 0) {
             throw new IOException("ffmpeg produced empty output at " + tmpOut);
         }
 
-        if (Files.size(tmpOut) > maximumBytes) throw new TooLargeException();
         Files.createDirectories(targetMp4.getParent());
+        moveIntoPlace(tmpOut, targetMp4);
+    }
+
+    /** Publishes the finished clip so that its final name only ever appears complete. */
+    static void moveIntoPlace(Path tmpOut, Path targetMp4) throws IOException {
         try {
             Files.move(tmpOut, targetMp4, StandardCopyOption.ATOMIC_MOVE,
                     StandardCopyOption.REPLACE_EXISTING);
         } catch (AtomicMoveNotSupportedException e) {
-            // Cross-volume - the copy is non-atomic at byte level but the destination
-            // filename only appears once the copy completes.
-            Files.move(tmpOut, targetMp4, StandardCopyOption.REPLACE_EXISTING);
+            // Another volume: a plain move would grow the file under its final name.
+            // Copy it next to the target first, then rename inside that volume.
+            Path part = targetMp4.resolveSibling(targetMp4.getFileName() + ".part");
+            Files.copy(tmpOut, part, StandardCopyOption.REPLACE_EXISTING);
+            Files.move(part, targetMp4, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            Files.delete(tmpOut);
         }
-    }
-
-    public static final class TooLargeException extends IOException {
-        TooLargeException() { super("Cloud video exceeds the byte limit"); }
     }
 
     private static String[] buildEncodeCommand(Path ffmpegExe, Path concatList, Path tmpOut,
@@ -198,24 +176,23 @@ public final class ClipFinalizer {
     static void writeSegmentOrder(Path directory, List<Path> segments) throws IOException {
         StringBuilder list = new StringBuilder();
         for (Path segment : segments) list.append(segment.getFileName()).append('\n');
-        Files.writeString(directory.resolve("list.txt"), list.toString());
+        // A kill between create and write must not leave a torn list behind.
+        Path temporary = directory.resolve(MANIFEST + ".tmp");
+        Files.writeString(temporary, list.toString());
+        Files.move(temporary, directory.resolve(MANIFEST), StandardCopyOption.ATOMIC_MOVE);
     }
 
+    /** Scratch folders only: the list is written after every copy is complete, so an unusable one falls back to file time. */
     static List<Path> segmentsInOrder(Path dir) throws IOException {
         List<Path> listed = readSegmentList(dir);
-        return listed == null ? listMovFilesByMtimeAsc(dir) : listed;
+        return listed == null || listed.isEmpty() ? listMovFilesByMtimeAsc(dir) : listed;
     }
 
     static List<Path> completedRingSegments(Path dir, int bufferSeconds) throws IOException {
-        if (bufferSeconds <= 0 || bufferSeconds == Integer.MAX_VALUE) throw new IOException("Invalid ring buffer size");
+        if (bufferSeconds <= 0) throw new IOException("Invalid ring buffer size");
         List<Path> listed = readSegmentList(dir);
-        if (listed == null) {
-            List<Path> legacy = listMovFilesByMtimeAsc(dir);
-            return legacy.size() <= 1 ? List.of() : new ArrayList<>(legacy.subList(
-                    Math.max(0, legacy.size() - bufferSeconds - 1), legacy.size() - 1));
-        }
         int ringSize = bufferSeconds + 1;
-        if (listed.isEmpty() || listed.size() > ringSize) return List.of();
+        if (listed == null || listed.isEmpty() || listed.size() > ringSize) return List.of();
         int previous = -1;
         for (Path segment : listed) {
             String name = segment.getFileName().toString();
@@ -229,18 +206,17 @@ public final class ClipFinalizer {
         // The next slot may already be open, even while its previous entry remains in the list.
         Path active = dir.resolve(((previous + 1) % ringSize) + ".mov");
         listed.remove(active);
-        return new ArrayList<>(listed.subList(Math.max(0, listed.size() - bufferSeconds), listed.size()));
+        return listed;
     }
 
     private static List<Path> readSegmentList(Path dir) throws IOException {
-        Path manifest = dir.resolve("list.txt");
+        Path manifest = dir.resolve(MANIFEST);
         if (!Files.exists(manifest)) return null;
         String list = Files.readString(manifest, StandardCharsets.UTF_8);
         // FFmpeg's flat list contains raw basenames and is published by rename after each trailer.
         if (list.isEmpty() || !list.endsWith("\n")) return new ArrayList<>();
         List<Path> segments = new ArrayList<>();
         for (String line : list.split("\n")) {
-            if (line.endsWith("\r")) line = line.substring(0, line.length() - 1);
             Path filename;
             try { filename = Path.of(line); }
             catch (java.nio.file.InvalidPathException invalid) { return new ArrayList<>(); }
@@ -270,43 +246,26 @@ public final class ClipFinalizer {
         }
     }
 
-    private static void drainInto(java.io.InputStream in, OutputCapture capture) {
-        try (java.io.BufferedReader reader = new java.io.BufferedReader(
-                new java.io.InputStreamReader(in, StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                capture.accept(line);
-            }
-        } catch (IOException ignored) {
-            // Stream closed (process exited or destroyed); drainer exits.
-        }
-    }
-
-    private static void joinQuietly(Thread t, long millis) {
+    /** Kills FFmpeg and gives it a moment to release its files. */
+    private static void kill(Process process) {
+        process.destroyForcibly();
         try {
-            t.join(millis);
+            process.waitFor(500, TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
     }
 
-    /**
-     * Thread-safe capture of the first few lines of ffmpeg output for inclusion
-     * in error messages. Subsequent lines are still drained from the pipe (so
-     * ffmpeg never blocks on a full buffer) but not stored.
-     */
-    private static final class OutputCapture {
-        private static final int MAX_LINES = 8;
-        private final List<String> firstLines = new ArrayList<>(MAX_LINES);
-
-        synchronized void accept(String line) {
-            if (firstLines.size() < MAX_LINES) {
-                firstLines.add(line);
-            }
+    /** The first lines of an FFmpeg output file, for an error message. */
+    static String outputHead(Path output) {
+        List<String> head = new ArrayList<>();
+        try (java.io.BufferedReader reader = new java.io.BufferedReader(
+                new java.io.InputStreamReader(Files.newInputStream(output), StandardCharsets.UTF_8))) {
+            String line;
+            while (head.size() < 8 && (line = reader.readLine()) != null) head.add(line);
+        } catch (IOException unreadable) {
+            // No output file: nothing to add.
         }
-
-        synchronized String suffix() {
-            return firstLines.isEmpty() ? "" : "; tail: " + String.join(" | ", firstLines);
-        }
+        return head.isEmpty() ? "" : "; tail: " + String.join(" | ", head);
     }
 }

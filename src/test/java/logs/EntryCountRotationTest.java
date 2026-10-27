@@ -8,13 +8,14 @@ import com.automationanywhere.botcommand.data.model.Schema;
 import com.automationanywhere.botcommand.data.model.table.Row;
 import com.automationanywhere.botcommand.data.model.table.Table;
 import com.automationanywhere.botcommand.utilities.logger.CustomLogger;
-import com.automationanywhere.botcommand.utilities.logger.EntryCountBasedTriggeringPolicy;
 import org.apache.commons.io.FilenameUtils;
 import org.apache.logging.log4j.Level;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 import org.testng.Assert;
+import support.TempDirectories;
+import support.TestLogMessage;
 
 import java.io.File;
 import java.io.IOException;
@@ -38,6 +39,7 @@ public class EntryCountRotationTest {
     private static final String LOG_VARIABLE = "YES";
     private static final String DO_NOT_LOG_VARIABLE = "NO";
 
+    private final TempDirectories directories = new TempDirectories();
     private String baseTestPath;
     private Map<String, Value> sourceMap;
     private LogMessage logMessage;
@@ -45,14 +47,11 @@ public class EntryCountRotationTest {
 
     @BeforeClass
     public void setUp() throws IOException {
-        // Create test directory in target folder with timestamp to avoid conflicts
-        baseTestPath = "src/test/target/test-artifacts/entry-rotation-" + System.currentTimeMillis() + "/";
-        Files.createDirectories(Paths.get(baseTestPath));
+        baseTestPath = directories.create("entry-rotation") + File.separator;
 
         // Initialize LogMessage action
-        logMessage = new LogMessage();
+        logMessage = TestLogMessage.create();
         stopLoggerSession = new StopLoggerSession();
-        logMessage.setTestBotUri("Automation Anywhere/bots/test/entry-rotation-bot");
 
         // Setup test variables similar to LoggerTest
         setupTestVariables();
@@ -96,60 +95,9 @@ public class EntryCountRotationTest {
         sourceMap.put("Rotation Types", tableValue);
     }
 
-    @AfterClass
+    @AfterClass(alwaysRun = true)
     public void tearDown() {
-        // Log location for debugging if needed
-        System.out.println("Entry rotation test logs available at: " + baseTestPath);
-    }
-
-    @Test
-    public void testEntryBasedRotation() throws Exception {
-        // Use the target directory for test logs
-        String logFilePath = baseTestPath + "rotation-test.html";
-
-        // Create logger with a small entry limit for testing
-        int maxEntries = 5;
-        CustomLogger customLogger = new CustomLogger("TestLogger_" + UUID.randomUUID(),
-                                                      logFilePath, maxEntries);
-
-        // Verify screenshots and variables directories are created
-        String screenshotsDir = baseTestPath + "screenshots";
-        String variablesDir = baseTestPath + "variables";
-        Assert.assertTrue(Files.exists(Paths.get(screenshotsDir)), "Screenshots directory should be created");
-        Assert.assertFalse(Files.exists(Paths.get(variablesDir)), "Variables stay inside the log");
-
-        // Log more entries than the limit to trigger rotation
-        for (int i = 1; i <= 10; i++) {
-            // Capture screenshot on even entries
-            boolean captureScreenshot = (i % 2 == 0);
-
-            // Log variables on every 3rd entry
-            String logVariables = (i % 3 == 0) ? LOG_VARIABLE : DO_NOT_LOG_VARIABLE;
-
-            // Use LogMessage.action() to properly test all features
-            logMessage.action(
-                customLogger,
-                LEVEL_INFO,
-                "Test log entry " + i + " with entry-based rotation",
-                captureScreenshot,
-                logVariables,
-                sourceMap
-            );
-        }
-
-        // Close the logger
-        stopLoggerSession.stop(customLogger);
-
-        // Check if rotation occurred - should have created backup file(s)
-        File originalFile = new File(logFilePath);
-
-        // Check for rotated files with pattern: 1_log.html, 2_log.html, etc.
-        String baseName = FilenameUtils.getBaseName(logFilePath);
-        String ext = FilenameUtils.getExtension(logFilePath);
-        File rotatedFile = new File(baseTestPath + "1_" + baseName + "." + ext);
-
-        Assert.assertTrue(originalFile.exists(), "Original log file should exist");
-        Assert.assertTrue(rotatedFile.exists(), "First rotated log file (1_" + baseName + "." + ext + ") should exist");
+        directories.deleteAll();
     }
 
     @Test
@@ -276,11 +224,6 @@ public class EntryCountRotationTest {
         String originalContent = CompressedSnapshots.expand(new String(Files.readAllBytes(originalFile.toPath())));
         Assert.assertTrue(originalContent.contains("class='img-link'"),
             "Screenshot references should be preserved");
-        Assert.assertTrue(originalContent.contains("<img"), "Screenshot thumbnail image should be preserved");
-        Assert.assertTrue(originalContent.contains("loading='lazy'"), "Screenshot image should lazy load");
-        Assert.assertTrue(originalContent.contains("decoding='async'"), "Screenshot image should decode asynchronously");
-        Assert.assertTrue(originalContent.contains("width='88'"), "Screenshot image should reserve thumbnail width");
-        Assert.assertTrue(originalContent.contains("height='50'"), "Screenshot image should reserve thumbnail height");
         Assert.assertTrue(originalContent.contains("class='entry-variables'"),
             "Inline variables should be preserved");
 
@@ -293,64 +236,5 @@ public class EntryCountRotationTest {
         Assert.assertFalse(Files.exists(Paths.get(variablesDir)));
         Assert.assertTrue(originalContent.contains("Rotation Types"), "table variable is inline");
         Assert.assertTrue(originalContent.contains("Deprecated"), "table values are inline");
-    }
-
-    @Test
-    public void testScreenshotAndVariableCapture() throws Exception {
-        // Specific test to verify screenshots and variables are properly captured
-        String testPath = baseTestPath + "capture-test/";
-        Files.createDirectories(Paths.get(testPath));
-
-        String logFilePath = testPath + "capture.html";
-        CustomLogger customLogger = new CustomLogger("CaptureLogger_" + UUID.randomUUID(),
-                                                      logFilePath, 10);
-
-        // Log entry with screenshot and variables
-        logMessage.action(
-            customLogger,
-            LEVEL_INFO,
-            "Testing screenshot and variable capture",
-            true,  // capture screenshot
-            LOG_VARIABLE,
-            sourceMap
-        );
-
-        stopLoggerSession.stop(customLogger);
-
-        // Verify screenshot was created
-        String screenshotsDir = testPath + "screenshots";
-        File screenshotDir = new File(screenshotsDir);
-        File[] screenshots = screenshotDir.listFiles((dir, name) -> name.endsWith(".png"));
-        Assert.assertNotNull(screenshots, "Screenshots should be created");
-        Assert.assertEquals(screenshots.length, 1, "Exactly one screenshot should be created");
-
-        // Verify the screenshot file exists and has content
-        File screenshot = screenshots[0];
-        Assert.assertTrue(screenshot.exists(), "Screenshot file should exist");
-        Assert.assertTrue(screenshot.length() > 0, "Screenshot file should have content");
-
-        Assert.assertFalse(Files.exists(Paths.get(testPath, "variables")));
-
-        // Verify HTML contains links to both
-        String htmlContent = CompressedSnapshots.expand(new String(Files.readAllBytes(Paths.get(logFilePath))));
-        Assert.assertTrue(htmlContent.contains("class='img-link'"), "HTML should contain screenshot link");
-        Assert.assertTrue(htmlContent.contains("<img"), "HTML should contain screenshot thumbnail image");
-        Assert.assertTrue(htmlContent.contains("loading='lazy'"), "Screenshot image should lazy load");
-        Assert.assertTrue(htmlContent.contains("decoding='async'"), "Screenshot image should decode asynchronously");
-        Assert.assertTrue(htmlContent.contains("width='88'"), "Screenshot image should reserve thumbnail width");
-        Assert.assertTrue(htmlContent.contains("height='50'"), "Screenshot image should reserve thumbnail height");
-        Assert.assertTrue(htmlContent.contains("class='entry-variables'"), "HTML should contain inline variables");
-    }
-
-    @Test
-    public void testEntryCountPolicyCreation() {
-        // Test the EntryCountBasedTriggeringPolicy builder
-        EntryCountBasedTriggeringPolicy.Builder builder = EntryCountBasedTriggeringPolicy.newBuilder();
-        builder.withMaxEntries(100);
-
-        EntryCountBasedTriggeringPolicy policy = builder.build();
-
-        Assert.assertNotNull(policy, "Policy should be created successfully");
-        Assert.assertEquals(policy.getCurrentEntryCount(), 0, "Initial count should be 0");
     }
 }

@@ -1,6 +1,7 @@
 package com.automationanywhere.botcommand.utilities.screen.recorder;
 
 import org.testng.Assert;
+import org.testng.SkipException;
 import org.testng.annotations.Test;
 import screen.process.RecorderTestSupport;
 
@@ -56,6 +57,59 @@ public class SegmentOrderingTest {
             Assert.assertEquals(ClipFinalizer.segmentsInOrder(directory), List.of(second, first));
             ClipFinalizer.writeSegmentOrder(directory, List.of(first, second));
             Assert.assertEquals(ClipFinalizer.segmentsInOrder(directory), List.of(first, second));
+        } finally { RecorderTestSupport.deleteRecursivelyQuietly(directory); }
+    }
+
+    @Test
+    public void anEmptyOrTornScratchListFallsBackToFileTimeButAGoodListWins() throws Exception {
+        Path directory = Files.createTempDirectory("scratch-list-torn");
+        try {
+            Path older = Files.createFile(directory.resolve("b.mov"));
+            Path newer = Files.createFile(directory.resolve("a.mov"));
+            Files.setLastModifiedTime(older, FileTime.fromMillis(1000));
+            Files.setLastModifiedTime(newer, FileTime.fromMillis(2000));
+            // A kill between create and write leaves an empty file; a torn write misses the final newline.
+            for (String unusable : List.of("", "a.mov\nb.m")) {
+                Files.writeString(directory.resolve("list.txt"), unusable);
+                Assert.assertEquals(ClipFinalizer.segmentsInOrder(directory), List.of(older, newer), unusable);
+            }
+            Files.writeString(directory.resolve("list.txt"), "a.mov\nb.mov\n");
+            Assert.assertEquals(ClipFinalizer.segmentsInOrder(directory), List.of(newer, older));
+        } finally { RecorderTestSupport.deleteRecursivelyQuietly(directory); }
+    }
+
+    @Test
+    public void aRingWithoutAListHasNoCompletedSegmentsAndNeverFallsBackToFileTime() throws Exception {
+        Path directory = Files.createTempDirectory("ring-without-list");
+        try {
+            Files.createFile(directory.resolve("0.mov"));
+            Files.createFile(directory.resolve("1.mov"));
+            Assert.assertTrue(ClipFinalizer.completedRingSegments(directory, 3).isEmpty());
+            Files.writeString(directory.resolve("list.txt"), "");
+            Assert.assertTrue(ClipFinalizer.completedRingSegments(directory, 3).isEmpty());
+            Assert.expectThrows(java.io.IOException.class, () -> ClipFinalizer.completedRingSegments(directory, 0));
+            // The ring size is buffer + 1: the largest int must not wrap around into a size that accepts the list.
+            Files.writeString(directory.resolve("list.txt"), "0.mov\n1.mov\n");
+            Assert.assertEquals(ClipFinalizer.completedRingSegments(directory, 3).size(), 2);
+            Assert.assertTrue(ClipFinalizer.completedRingSegments(directory, Integer.MAX_VALUE).isEmpty());
+        } finally { RecorderTestSupport.deleteRecursivelyQuietly(directory); }
+    }
+
+    @Test
+    public void theScratchListIsReplacedInOnePieceNeverRewrittenInPlace() throws Exception {
+        Path directory = Files.createTempDirectory("scratch-list-atomic");
+        try {
+            Path segment = Files.createFile(directory.resolve("0.mov"));
+            Path list = directory.resolve("list.txt");
+            Files.writeString(list, "old\n");
+            // A second name for the old file shows an in-place rewrite: it would read the new text, or a torn one.
+            Path reader = directory.resolve("reader");
+            try { Files.createLink(reader, list); }
+            catch (UnsupportedOperationException | java.io.IOException noLinks) { throw new SkipException("This file system has no hard links"); }
+            ClipFinalizer.writeSegmentOrder(directory, List.of(segment));
+            Assert.assertEquals(Files.readString(reader), "old\n");
+            Assert.assertEquals(Files.readString(list), "0.mov\n");
+            Assert.assertFalse(Files.exists(directory.resolve("list.txt.tmp")));
         } finally { RecorderTestSupport.deleteRecursivelyQuietly(directory); }
     }
 

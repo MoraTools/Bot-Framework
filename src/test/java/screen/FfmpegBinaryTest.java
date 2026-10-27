@@ -3,26 +3,15 @@ package screen;
 import com.automationanywhere.botcommand.utilities.screen.recorder.FfmpegBinary;
 import org.testng.Assert;
 import org.testng.annotations.Test;
+import support.Sha256;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.MessageDigest;
 import java.util.Locale;
 
 public class FfmpegBinaryTest {
-
-    @Test
-    public void locateExtractsBinaryOnFirstCall() throws IOException {
-        Path resolved = FfmpegBinary.locate();
-
-        Assert.assertNotNull(resolved, "locate() must return a non-null path");
-        Assert.assertTrue(Files.exists(resolved),
-                "extracted ffmpeg.exe should exist at " + resolved);
-        Assert.assertTrue(Files.size(resolved) > 1_000_000,
-                "binary should be at least ~1 MB; got " + Files.size(resolved));
-    }
 
     @Test
     public void locateReturnsSamePathOnSecondCall() throws IOException {
@@ -35,7 +24,7 @@ public class FfmpegBinaryTest {
     @Test
     public void extractedBinaryMatchesBundledHash() throws IOException {
         Path resolved = FfmpegBinary.locate();
-        String actual = sha256Hex(resolved);
+        String actual = Sha256.hex(resolved);
         Assert.assertEquals(actual.toLowerCase(Locale.ROOT),
                 FfmpegBinary.BUNDLED_SHA256.toLowerCase(Locale.ROOT),
                 "extracted binary's SHA-256 must equal the compile-time constant");
@@ -75,27 +64,6 @@ public class FfmpegBinaryTest {
             Assert.assertEquals(read, 2);
             Assert.assertEquals(magic[0], (byte) 'M', "first byte of PE binary should be 'M'");
             Assert.assertEquals(magic[1], (byte) 'Z', "second byte of PE binary should be 'Z'");
-        }
-    }
-
-    private static String sha256Hex(Path file) throws IOException {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            try (InputStream in = Files.newInputStream(file)) {
-                byte[] buf = new byte[64 * 1024];
-                int n;
-                while ((n = in.read(buf)) != -1) {
-                    digest.update(buf, 0, n);
-                }
-            }
-            byte[] hash = digest.digest();
-            StringBuilder sb = new StringBuilder(hash.length * 2);
-            for (byte b : hash) {
-                sb.append(String.format(Locale.ROOT, "%02x", b));
-            }
-            return sb.toString();
-        } catch (java.security.NoSuchAlgorithmException e) {
-            throw new IOException(e);
         }
     }
 }

@@ -4,7 +4,6 @@ import com.automationanywhere.botcommand.data.Value;
 import com.automationanywhere.botcommand.data.impl.DictionaryValue;
 import com.automationanywhere.botcommand.data.impl.StringValue;
 import com.automationanywhere.botcommand.exception.BotCommandException;
-import com.automationanywhere.botcommand.utilities.file.FileValidator;
 import com.automationanywhere.commandsdk.annotations.*;
 import com.automationanywhere.commandsdk.annotations.rules.FileExtension;
 import com.automationanywhere.commandsdk.annotations.rules.ListType;
@@ -130,9 +129,6 @@ public class JSONReader {
             }
             switch (inputMethod) {
                 case INPUT_TYPE_FILE:
-                    FileValidator fileValidator = new FileValidator(jsonFilePath);
-                    String[] allowedExtensions = {"json"};
-                    fileValidator.validateFile(allowedExtensions);
                     Charset charset = Charset.forName(charsetName);
 
                     String jsonContent = Files.readString(Path.of(jsonFilePath), charset);

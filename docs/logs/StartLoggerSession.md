@@ -26,7 +26,13 @@
 * **Description:** The path to the log file where all logs (INFO, WARN, ERROR) will be stored.
 * **Constraints:** Must be a local file path ending with the `.html` extension. Cannot be empty.
 
-Each HTML file has an OS ownership lock. Sessions in the same JVM can share it. A start from another process is rejected before append or migration. The owner writes a local `WARN` on its next log call or close. This warning does not reach Helios, advance its ordinal, change its result, or capture media. The last session to close releases the lock.
+Each HTML file has two sidecar files beside it, named after the full HTML file name: `<log>.a360.lock` (for example `log.html.a360.lock`) and `<log>.a360-contention`. The lock file holds an OS file lock that stops two processes from writing one HTML log. It stays on disk after the session ends. The contention file is a notice that a rejected process leaves for the owner. The owner deletes it when it reports it, and a new owner deletes an old one when it starts. Do not delete either file while a bot that uses the log runs. See [Local HTML logs](../../README.md#local-html-logs).
+
+The folder is resolved through links, so `.`, `..` and links to one folder count as one file. Sessions in the same JVM can share the lock; the last session to close releases it. A start from another process is rejected before append or migration, leaves the notice, and throws `BotCommandException` with `Error occurred while creating new session: Another process owns HTML log: <path>. Close its logger session before starting this session.` The same real file already open in this process under another path spelling, or by another copy of the package classes, gives `HTML log is already open in this process: <path>. Use one path for it, or close the other logger session first.` with the same prefix, and writes no notice.
+
+The owner looks for the notice at most once per second when it logs, and always at close. Then it writes one local `WARN`: `Another process was rejected because this session owns HTML log: <path>`. This warning does not reach Helios, advance its ordinal, change its result, or capture media.
+
+When the file system gives no lock (for example a read-only folder or a share without lock support), the session still starts and only this process is protected. The Log4j status log gets the `ERROR` message `Cannot lock HTML log <path>. Another process can write it at the same time.`, not the HTML log.
 
 ### INFO logs file path
 
@@ -56,7 +62,7 @@ Each HTML file has an OS ownership lock. Sessions in the same JVM can share it. 
 * **Description:** The maximum number of log entries written to a single log file before it is rolled over (archived and a new one started).
 * **Constraints:** Must be a number greater than 0.
 
-Variable tables do not add to the entry count. Each file shows Machine and User once in a sticky header. Complete format-6 logs remain appendable across sessions with the same Machine and User. An old-format or incomplete active file, or one with a different identity, is moved intact to the next numbered archive before a fresh log is opened. All original bytes, existing archives, and old variable pages remain unchanged. If that move fails, session startup reports an error instead of altering the existing file.
+Variable tables do not add to the entry count. Each file shows Machine and User once in a sticky header. Complete format-7 logs remain appendable across sessions with the same Machine and User. An old-format or incomplete active file, or one with a different identity, is moved intact to the next numbered archive before a fresh log is opened. All original bytes, existing archives, and old variable pages remain unchanged. If that move fails, session startup reports an error instead of altering the existing file.
 
 ### Screen recording
 
@@ -66,7 +72,7 @@ Variable tables do not add to the entry count. Each file shows Machine and User 
   * `Capture rolling video`: Continuously capture the desktop into a rolling buffer in the background. For each log entry at one of the selected levels below, the last N seconds are saved as an MP4 placed next to the log file. On JVM crash, the next recorder startup attempts to recover complete buffered segments into a `crash-recording-<sessionId>.mp4`. Windows-only; primary monitor only. If the recorder fails to start, the session degrades silently to the existing screenshot-only path.
 * **Default:** `No video`
 
-Completed segments follow FFmpeg's segment-list order. Old recorder folders without a list use modification-time order. Interrupted recovery resumes from `.salvaging` on a later recorder startup; existing cleanup rules still apply to corrupt or failed recordings. Concurrent FFmpeg extraction uses a process lock and a unique temporary file. See [Bundled FFmpeg](../../README.md#bundled-ffmpeg).
+Completed segments follow FFmpeg's segment-list order. Recovery uses modification-time order for rings without a list and for scratch copies with a missing, empty or invalid list. Interrupted recovery resumes from `.salvaging` on a later recorder startup; existing cleanup rules still apply to corrupt or failed recordings. Concurrent FFmpeg extraction uses a process lock and the fixed `ffmpeg.exe.tmp` file under that lock. See [Bundled FFmpeg](../../README.md#bundled-ffmpeg).
 
 ### Record video on INFO entries
 
@@ -111,7 +117,7 @@ Completed segments follow FFmpeg's segment-list order. Old recorder folders with
 * **Type:** `Select`
 * **Options:**
   * `Disabled`: The session writes the HTML log only. Nothing leaves the runner.
-  * `Enabled`: Every entry of this session is also streamed to a Helios Cloud server while the bot runs.
+  * `Enabled`: Every entry of this session is also streamed to a Helios Cloud server while the bot runs. Entries from other packages (for example Better Recorder) stream only at WARN and ERROR.
 * **Default:** `Disabled`
 * **Description:** Every ERROR uploads media that inherits Screen recording. Capture rolling video with ERROR checked
   uploads the local ERROR clip and a separate screenshot. No video, ERROR unchecked, or disabled recording uploads
@@ -137,15 +143,15 @@ Completed segments follow FFmpeg's segment-list order. Old recorder folders with
 When streaming is enabled the action creates a local disk journal. A background sender opens the remote session and posts batches while the bot runs.
 
 * **Session start** `POST {url}/api/ingest/sessions` with the execution id, stable logger-session UUID, bot URI, master Task Bot URI, Control Room file id, machine, user, local start time and the UTC offset in minutes. Helios Cloud identifies the bot by its master Task Bot, so both URIs are sent: `botUri` is the bot that opened the logger session and `parentBotUri` is the master that started the run, empty when the logger runs in the master itself. The Control Room file id is read from the master URI when it carries one, otherwise from the bot URI. The execution id comes from the bot agent; a random UUID is used when it is not available.
-* **Entries** `POST {url}/api/ingest/sessions/{id}/entries`, one envelope per entry, carrying the same timestamp, level, source, task, machine, user, message, variable count and screenshot/clip path that the HTML row shows. Every ERROR also declares media: video and a screenshot when ERROR recording is active, otherwise a screenshot. Local media paths remain in the row.
+* **Entries** `POST {url}/api/ingest/sessions/{id}/entries`, batches with a first ordinal, timestamp, UTC offset, level, source, task, message, variable count, logged variables and screenshot/clip path. Entries do not carry Machine and User: the session start requests `sessionIdentity`, and Helios takes both values from the session start. Every ERROR also declares media: video and a screenshot when ERROR recording is active, otherwise a screenshot. Local media paths remain in the row.
 * **Session end** `POST {url}/api/ingest/sessions/{id}/end`, sent by `Stop Logger Session`.
 
-An inherited Logger Session shares its identity and ordinal counter. A new `Start Logger Session` creates a separate stream under the same AA execution. Helios must return distinct `sessionId` and `executionSessionId` UUIDs and confirm the AA `executionId`. Older servers that cannot confirm separate streams leave new journals on disk without verified delivery. Old journals without `loggerSessionId` can still replay. Servers without `sessionIdentity` support receive Machine and User in each row. Helios Cloud 0.7.1 is compatible. See [the stream contract](../../README.md#what-is-sent).
+An inherited Logger Session shares its identity and ordinal counter. A new `Start Logger Session` creates a separate stream under the same AA execution. Helios must return distinct `sessionId` and `executionSessionId` UUIDs and confirm the AA `executionId`. A start reply with a valid `sessionId` that does not confirm this refuses the session with one warning: `Helios did not confirm separate logger streams. Update Helios; saved entries remain on disk for later delivery.` Any other invalid start reply is retried. Helios Cloud 0.5.0 or later is required; 0.7.1 was used for the delivery checks. See [the stream contract](../../README.md#what-is-sent).
 
 **Inherited ERROR media.** There is no separate media selector. A requested ERROR video uses the existing
 5-90 second buffer and FAST/COMPACT codec. No video does not start another recorder. Failed capture or encoding
 preserves the ERROR row and reports unavailable media. Video keeps its independent poster, including when the
-ring is empty, the queue is full, encoding fails, or the clip exceeds 8 MiB. PNG/JPEG limit: 1 MiB. Video retention:
+ring is empty, the queue is full, encoding fails, or the clip exceeds 8 MiB. Screenshot (PNG) limit: 1 MiB. Video retention:
 3 days. Screenshot retention: 14 days. Storage limits can remove media sooner. The runner does not encode a second
 video. A later Helios-enabled session with the same URL/key retries pending media even when No video is selected
 or ERROR recording is unchecked. JSON `/end` and media delivery remain independent.
@@ -156,7 +162,7 @@ or ERROR recording is unchecked. JSON `/end` and media delivery remain independe
 
 * **Type:** `Session`
 * **Assignment Variable:** `Logger` (Session)
-* **Description:** Returns a session object representing the initialized logger session. This session variable must be used in subsequent logging commands (e.g., `Write Log`, `End Logger Session`).
+* **Description:** Returns a session object representing the initialized logger session. Use this session variable in **Log Message** and **Stop Logger Session**.
 
 ## Exceptions
 
@@ -171,7 +177,7 @@ Throws `BotCommandException` if:
 
 If the screen recorder fails to start (for example, when running headless or when the bundled ffmpeg cannot extract), the session degrades silently to the existing screenshot-only path rather than failing the bot.
 
-Helios delivery delays and failures are reported once per logger session as a local `WARN`. A failure to save an entry adds an incomplete-log warning even after an earlier delivery warning. These diagnostics are not streamed and do not advance the ordinal or change the session result.
+Helios writes one local `WARN` for a delivery delay per logger session. Each distinct terminal message, including rejection, incomplete replay, pending delivery or a retained journal, is written once and is not hidden by an earlier delay warning. An invalid URL (not http or https, or no host) gives one warning: `Invalid Helios URL. Use an http or https URL with a host. HTML logging continues without cloud logs.` Nothing is saved for Helios and `Stop Logger Session` does not wait. A start reply without a valid `sessionId`, and an end reply that is not a valid Helios receipt (including an empty reply), are retried, not treated as a refusal. An HTTP rejection such as 400/401/403/404 refuses delivery, and so does a start reply that does not confirm separate logger streams. A refused session ends the stop wait early when no older journals remain to replay. A verified end still counts as delivered if journal deletion fails; the journal stays on disk with a warning. A failure to save an entry adds an incomplete-log warning even after an earlier delivery warning. These diagnostics are not streamed and do not advance the ordinal or change the session result.
 
 ## Logging from other packages
 
@@ -201,11 +207,13 @@ log.invoke(session, "WARN", "Invoice 42 skipped", "Other package",
 
 Links are relative to the folder of the HTML file when the file is on the same drive or root. For a different root (for example, another Windows drive), the link is a `file:` URI. File names are URL-quoted and HTML-escaped. A file name cannot become markup.
 
-The HTML format does not change. The entry has the same six columns, counts as one entry toward the maximum log entries, and follows the same rollover rules. Existing format-6 logs continue to render and accept appended entries.
+The entry has the same six columns as a `Log Message` entry, counts as one entry toward the maximum log entries, and follows the same rollover rules.
 
-### No media capture or upload
+### Media and Helios
 
-`logExternal` does not capture the screen, record or save a video, take a snapshot of the rolling buffer, or add Helios ERROR media. This is also true for the `ERROR` level. Helios Cloud receives the level, the message, and the source in the same way as for other entries. The `screenPath` field is empty. Helios does not receive the screenshot path, the attachment path, or any file bytes. The local HTML log keeps the links.
+An `ERROR` entry gets the same media as a `Log Message` ERROR entry with **Capture Screenshot** off. With Helios streaming on, a desktop screenshot goes to Helios, and the clip too when ERROR video is recorded. With ERROR video on, the row gets the clip and its poster. A clip shows in the Screen column instead of the supplied screenshot. A capture failure does not throw: the entry is written, and Helios gets the failure in its media. `INFO` and `WARN` entries never capture.
+
+Helios Cloud receives only the `WARN` and `ERROR` entries, with the level, the message, and the source. `INFO` entries stay in the HTML log only and take no stream ordinal. The `screenPath` field is empty. Helios does not receive the screenshot path, the attachment path, or the bytes of these files. The local HTML log keeps the links.
 
 ### File ownership
 
@@ -213,4 +221,4 @@ The caller owns the files. The logger only reads them to check the path and to s
 
 ### Closed session
 
-After `Stop Logger Session` closes the session, `logExternal` throws `IllegalStateException` with the message `Logger session is closed`. Nothing is written. A call from another thread waits while the session closes, and then it throws this exception. Calls from many threads are safe, and each call writes one complete entry.
+`Stop Logger Session` marks the session closed when the close starts. A `logExternal` call that starts after that throws `IllegalStateException` with the message `Logger session is closed` at once. Nothing is written. Calls do not wait for the close. Calls from many threads are safe, and each entry that is written is complete. A call that passed the check just before the close started can be dropped.

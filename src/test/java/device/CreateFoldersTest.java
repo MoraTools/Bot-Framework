@@ -8,20 +8,24 @@ import com.automationanywhere.botcommand.data.impl.DictionaryValue;
 import com.automationanywhere.botcommand.data.impl.ListValue;
 import com.automationanywhere.botcommand.data.impl.StringValue;
 import com.automationanywhere.botcommand.exception.BotCommandException;
-import org.apache.commons.io.FileUtils;
 import org.testng.Assert;
 import org.testng.SkipException;
-import org.testng.annotations.AfterMethod;
+import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
+import support.TempDirectories;
 
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
 
 /**
  * @author Sumit Kumar
@@ -30,18 +34,19 @@ import java.util.Map;
 public class CreateFoldersTest {
     private static final String RELATIVE_PATH_TYPE = "RELATIVE";
     private static final String ABSOLUTE_PATH_TYPE = "ABSOLUTE";
+    private final TempDirectories temp = new TempDirectories();
     private CreateFolders createFolders;
     private Path testBasePath;
 
     @BeforeMethod
     public void setUp() throws Exception {
         createFolders = new CreateFolders();
-        testBasePath = Files.createTempDirectory("create-folder-test-");
+        testBasePath = temp.create("create-folder-test-");
     }
 
-    @AfterMethod
-    public void tearDown() throws Exception {
-        FileUtils.deleteDirectory(testBasePath.toFile());
+    @AfterClass(alwaysRun = true)
+    public void tearDown() {
+        temp.deleteAll();
     }
 
     @Test
@@ -138,13 +143,19 @@ public class CreateFoldersTest {
         Path existing = Files.createDirectories(testBasePath.resolve("existing"));
         Path marker = Files.writeString(existing.resolve("marker.txt"), "keep");
         Path fileParent = Files.writeString(testBasePath.resolve("file.txt"), "keep");
-        for (Path invalidPath : List.of(testBasePath.getRoot(), fileParent.resolve("child"))) {
-            Assert.expectThrows(BotCommandException.class, () -> createFolders.action(ABSOLUTE_PATH_TYPE,
-                    null, List.of(new StringValue(existing.toString()), new StringValue(invalidPath.toString())),
-                    true, false, null, null, null));
-            Assert.assertEquals(Files.readString(marker), "keep");
-            Assert.assertEquals(Files.readString(fileParent), "keep");
-        }
+        Path newFolder = testBasePath.resolve("new-folder");
+
+        // Overwrite stays off for the root: if the root check regressed, the test must not delete a real root.
+        Assert.expectThrows(BotCommandException.class, () -> createFolders.action(ABSOLUTE_PATH_TYPE,
+                null, List.of(new StringValue(newFolder.toString()), new StringValue(testBasePath.getRoot().toString())),
+                false, false, null, null, null));
+        Assert.assertFalse(Files.exists(newFolder));
+
+        Assert.expectThrows(BotCommandException.class, () -> createFolders.action(ABSOLUTE_PATH_TYPE,
+                null, List.of(new StringValue(existing.toString()), new StringValue(fileParent.resolve("child").toString())),
+                true, false, null, null, null));
+        Assert.assertEquals(Files.readString(marker), "keep");
+        Assert.assertEquals(Files.readString(fileParent), "keep");
     }
 
     @Test
@@ -213,5 +224,195 @@ public class CreateFoldersTest {
         Assert.assertEquals(config.get("original").get(), "keep");
         Assert.assertEquals(config.get("test_existing_Path").get(), existing.toString());
         Assert.assertEquals(config.get("test_child_Path").get(), base.resolve("new/child").toString());
+    }
+
+    private static void createSymbolicLinkOrSkip(Path link, Path target) {
+        try {
+            Files.createSymbolicLink(link, target);
+        } catch (IOException | UnsupportedOperationException | SecurityException e) {
+            throw new SkipException("Symbolic links are unavailable", e);
+        }
+    }
+
+    @DataProvider
+    public Object[][] relativeEntriesInAbsoluteMode() {
+        // The unique name stands for a plain name such as Output. Overwrite stays off in the test, so a
+        // regression cannot delete the working directory.
+        return new Object[][]{
+                {"."}, {".."}, {"C:"}, {"create-folders-" + UUID.randomUUID()}
+        };
+    }
+
+    @Test(dataProvider = "relativeEntriesInAbsoluteMode")
+    public void testAbsoluteModeRejectsRelativeEntries(String relativeEntry) {
+        Path newFolder = testBasePath.resolve("new-folder");
+
+        BotCommandException e = Assert.expectThrows(BotCommandException.class, () -> createFolders.action(
+                ABSOLUTE_PATH_TYPE, null,
+                List.of(new StringValue(newFolder.toString()), new StringValue(relativeEntry)),
+                false, false, null, null, null));
+
+        Assert.assertTrue(e.getMessage().endsWith(relativeEntry), e.getMessage());
+        Assert.assertFalse(Files.exists(newFolder));
+    }
+
+    @Test
+    public void testMissingRootGivesClearError() throws Exception {
+        // Linux always has "/", so a relative path with a missing first element is the closest way to reach
+        // the case of an unmapped drive or an offline share. The method is private and has no other seam.
+        Path missing = Path.of("create-folders-" + UUID.randomUUID(), "child");
+        Method resolveExistingParents = CreateFolders.class.getDeclaredMethod("resolveExistingParents", Path.class);
+        resolveExistingParents.setAccessible(true);
+
+        InvocationTargetException e = Assert.expectThrows(InvocationTargetException.class,
+                () -> resolveExistingParents.invoke(createFolders, missing));
+
+        Assert.assertTrue(e.getCause() instanceof BotCommandException, String.valueOf(e.getCause()));
+        Assert.assertEquals(e.getCause().getMessage(), "Root of folder path does not exist: " + missing);
+    }
+
+    @Test
+    public void testErrorWithoutMessageStillNamesTheCause() {
+        Value<String> brokenValue = () -> {
+            throw new IllegalStateException();
+        };
+        List<Value> folderPaths = List.of(brokenValue);
+
+        BotCommandException e = Assert.expectThrows(BotCommandException.class, () -> createFolders.action(
+                ABSOLUTE_PATH_TYPE, null, folderPaths, false, false, null, null, null));
+
+        Assert.assertEquals(e.getMessage(), "java.lang.IllegalStateException");
+    }
+
+    @Test
+    public void testMissingOverwriteFlagMeansOff() {
+        Path folder = testBasePath.resolve("folder");
+
+        createFolders.action(ABSOLUTE_PATH_TYPE, null, List.of(new StringValue(folder.toString())),
+                null, false, null, null, null);
+
+        Assert.assertTrue(Files.isDirectory(folder));
+    }
+
+    @Test
+    public void testMissingAppendFlagMeansOff() {
+        Path folder = testBasePath.resolve("folder");
+        Map<String, Value> config = new HashMap<>();
+        config.put("original", new StringValue("keep"));
+
+        DictionaryValue result = createFolders.action(ABSOLUTE_PATH_TYPE, null, List.of(new StringValue(folder.toString())),
+                false, null, config, null, null);
+
+        Assert.assertTrue(Files.isDirectory(folder));
+        Assert.assertEquals(result.get("folder").get(), folder.toString());
+        Assert.assertEquals(config.keySet(), Set.of("original"));
+    }
+
+    @DataProvider
+    public Object[][] overlappingEntries() {
+        return new Object[][]{
+                {"ab/sub", "ab"}, {"ab", "ab/sub"}, {"ab", "ab"}, {"ab/sub", "ab/../ab/sub"}
+        };
+    }
+
+    @Test(dataProvider = "overlappingEntries")
+    public void testOverwriteRejectsEqualOrNestedEntries(String first, String second) throws Exception {
+        Path base = Files.createDirectories(testBasePath.resolve("base"));
+        Path existing = Files.createDirectories(base.resolve("ab"));
+        Path marker = Files.writeString(existing.resolve("marker.txt"), "keep");
+
+        Assert.expectThrows(BotCommandException.class, () -> createFolders.action(RELATIVE_PATH_TYPE,
+                base.toString(), List.of(new StringValue(first), new StringValue(second)),
+                true, false, null, null, null));
+
+        Assert.assertEquals(Files.readString(marker), "keep");
+        Assert.assertFalse(Files.exists(existing.resolve("sub")));
+    }
+
+    @Test
+    public void testOverwriteRejectsEntriesThatMeetThroughASymbolicLink() throws Exception {
+        Path base = Files.createDirectories(testBasePath.resolve("base"));
+        Path real = Files.createDirectories(base.resolve("real"));
+        Path marker = Files.writeString(real.resolve("marker.txt"), "keep");
+        createSymbolicLinkOrSkip(base.resolve("alias"), real);
+
+        Assert.expectThrows(BotCommandException.class, () -> createFolders.action(RELATIVE_PATH_TYPE,
+                base.toString(), List.of(new StringValue("alias/child"), new StringValue("real")),
+                true, false, null, null, null));
+
+        Assert.assertEquals(Files.readString(marker), "keep");
+        Assert.assertFalse(Files.exists(real.resolve("child")));
+    }
+
+    @Test
+    public void testOverlappingEntriesAreAllowedWhenOverwriteIsOff() throws Exception {
+        Path base = Files.createDirectories(testBasePath.resolve("base"));
+        Path existing = Files.createDirectories(base.resolve("ab"));
+        Path marker = Files.writeString(existing.resolve("marker.txt"), "keep");
+
+        DictionaryValue result = createFolders.action(RELATIVE_PATH_TYPE, base.toString(),
+                List.of(new StringValue("ab/sub"), new StringValue("ab")), false, false, null, null, null);
+
+        Assert.assertEquals(result.get().size(), 2);
+        Assert.assertTrue(Files.isDirectory(existing.resolve("sub")));
+        Assert.assertEquals(Files.readString(marker), "keep");
+    }
+
+    @DataProvider
+    public Object[][] linkTargets() {
+        return new Object[][]{{"outside"}, {"outside/marker.txt"}};
+    }
+
+    // A symbolic link is the closest Linux vector for a Windows junction: a junction cannot be made here.
+    @Test(dataProvider = "linkTargets")
+    public void testOverwriteRefusesFolderWithSymbolicLinkAndChangesNothing(String linkTarget) throws Exception {
+        Path base = Files.createDirectories(testBasePath.resolve("base"));
+        Path safe = Files.createDirectories(base.resolve("safe"));
+        Path safeMarker = Files.writeString(safe.resolve("marker.txt"), "keep");
+        Path inner = Files.createDirectories(base.resolve("risky/inner"));
+        Path innerMarker = Files.writeString(inner.resolve("marker.txt"), "keep");
+        Path outsideMarker = Files.writeString(
+                Files.createDirectories(testBasePath.resolve("outside")).resolve("marker.txt"), "keep");
+        Path link = inner.resolve("link");
+        createSymbolicLinkOrSkip(link, testBasePath.resolve(linkTarget));
+
+        BotCommandException e = Assert.expectThrows(BotCommandException.class, () -> createFolders.action(
+                RELATIVE_PATH_TYPE, base.toString(), List.of(new StringValue("safe"), new StringValue("risky")),
+                true, false, null, null, null));
+
+        Assert.assertTrue(e.getMessage().endsWith(link.toString()), e.getMessage());
+        Assert.assertEquals(Files.readString(safeMarker), "keep");
+        Assert.assertEquals(Files.readString(innerMarker), "keep");
+        Assert.assertEquals(Files.readString(outsideMarker), "keep");
+        Assert.assertTrue(Files.isSymbolicLink(link));
+    }
+
+    @Test
+    public void testOverwriteRefusesEntryThatIsASymbolicLink() throws Exception {
+        Path base = Files.createDirectories(testBasePath.resolve("base"));
+        Path real = Files.createDirectories(base.resolve("real"));
+        Path marker = Files.writeString(real.resolve("marker.txt"), "keep");
+        Path alias = base.resolve("alias");
+        createSymbolicLinkOrSkip(alias, real);
+
+        Assert.expectThrows(BotCommandException.class, () -> createFolders.action(RELATIVE_PATH_TYPE,
+                base.toString(), List.of(new StringValue("alias")), true, false, null, null, null));
+
+        Assert.assertEquals(Files.readString(marker), "keep");
+        Assert.assertTrue(Files.isSymbolicLink(alias));
+    }
+
+    @Test
+    public void testSymbolicLinkInsideIsAllowedWhenOverwriteIsOff() throws Exception {
+        Path base = Files.createDirectories(testBasePath.resolve("base"));
+        Path folder = Files.createDirectories(base.resolve("folder"));
+        Path link = folder.resolve("link");
+        createSymbolicLinkOrSkip(link, Files.createDirectories(testBasePath.resolve("outside")));
+
+        DictionaryValue result = createFolders.action(RELATIVE_PATH_TYPE, base.toString(),
+                List.of(new StringValue("folder")), false, false, null, null, null);
+
+        Assert.assertEquals(result.get("folder").get(), folder.toString());
+        Assert.assertTrue(Files.isSymbolicLink(link));
     }
 }

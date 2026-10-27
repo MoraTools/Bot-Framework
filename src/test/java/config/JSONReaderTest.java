@@ -233,6 +233,14 @@ public class JSONReaderTest {
         Assert.assertEquals(result.size(), 3);
     }
 
+    @Test
+    public void testMissingJsonFileNamesThePath() {
+        String missing = "invalid/path/to/missing.json";
+        BotCommandException e = Assert.expectThrows(BotCommandException.class,
+                () -> jsonReader.action("FILE", missing, CHARSET_UTF_8, null, "ALL", null, false));
+        Assert.assertTrue(e.getMessage().contains(missing), e.getMessage());
+    }
+
     @Test(expectedExceptions = BotCommandException.class)
     public void testJsonPathSegmentNotFound() {
         List<Value> jsonPathSegments = List.of(new StringValue("invalidSegment"));

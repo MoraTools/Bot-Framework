@@ -45,7 +45,7 @@ public class StageOneCaptureTest {
         levels.add(Level.ERROR);
 
         String sessionId = UUID.randomUUID().toString();
-        recorder = ScreenRecorder.start(sessionId, logDir, 5, levels, EncodingMode.COMPACT);
+        recorder = ScreenRecorder.start(sessionId, logDir, 5, levels, EncodingMode.COMPACT, false);
         Assert.assertNotSame(recorder, ScreenRecorder.DISABLED,
                 "real recorder should be returned for valid arguments");
         Assert.assertTrue(recorder.shouldRecordFor(Level.ERROR),
@@ -62,7 +62,7 @@ public class StageOneCaptureTest {
         levels.add(Level.ERROR);
 
         String sessionId = UUID.randomUUID().toString();
-        recorder = ScreenRecorder.start(sessionId, logDir, 5, levels, EncodingMode.COMPACT);
+        recorder = ScreenRecorder.start(sessionId, logDir, 5, levels, EncodingMode.COMPACT, false);
         Path ringDir = RecorderTestSupport.sessionRing(sessionId);
         Path sessionFolder = ringDir.getParent();
 
@@ -81,11 +81,11 @@ public class StageOneCaptureTest {
     @Test
     public void disabledSentinelOnEmptyLevelSet() {
         recorder = ScreenRecorder.start(UUID.randomUUID().toString(),
-                logDir, 30, new HashSet<>(), EncodingMode.COMPACT);
+                logDir, 30, new HashSet<>(), EncodingMode.COMPACT, false);
         Assert.assertSame(recorder, ScreenRecorder.DISABLED,
                 "empty level set should yield the DISABLED sentinel");
         Assert.assertFalse(recorder.shouldRecordFor(Level.ERROR));
-        Assert.assertNull(recorder.snapshotForError("any"));
+        Assert.assertNull(recorder.snapshotForError("any", ignored -> { }).video);
     }
 
     @Test
@@ -93,7 +93,7 @@ public class StageOneCaptureTest {
         Set<Level> levels = new HashSet<>();
         levels.add(Level.ERROR);
         recorder = ScreenRecorder.start(UUID.randomUUID().toString(),
-                logDir, 0, levels, EncodingMode.COMPACT);
+                logDir, 0, levels, EncodingMode.COMPACT, false);
         Assert.assertSame(recorder, ScreenRecorder.DISABLED);
     }
 

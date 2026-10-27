@@ -25,7 +25,7 @@ configure(allprojects){
 		groupName = 'com.automationanywhere'
 		testNgVersion = '7.12.0'
 		loggerVersion = '2.25.3'
-		version '5.1.0'
+		version '5.3.0'
 	}
 	group "$groupName"
 
@@ -37,21 +37,6 @@ configure(allprojects){
 
 	compileJava.options.encoding = 'UTF-8'
 	compileTestJava.options.encoding = 'UTF-8'
-
-	configurations { logViewerMinifier }
-	def compactLog = layout.buildDirectory.file('generated/log-viewer/log.html')
-	def minifyLogViewer = tasks.register('minifyLogViewer', JavaExec) {
-		javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(11) }
-		classpath = configurations.logViewerMinifier
-		mainClass = file('tools/MinifyLog.java').absolutePath
-		args file('src/main/resources/templates/log.html').absolutePath, compactLog.get().asFile.absolutePath
-		inputs.files('tools/MinifyLog.java', 'src/main/resources/templates/log.html')
-		outputs.file(compactLog)
-	}
-	sourceSets.main.resources.exclude('templates/log.html')
-	processResources {
-		from(minifyLogViewer) { into 'templates' }
-	}
 
 	repositories {
 		mavenCentral()
@@ -81,8 +66,6 @@ configure(allprojects){
 	shadowJar {
 		archiveBaseName = project.name
 		archiveClassifier = ''
-		mergeServiceFiles('META-INF/spring.*')
-		mergeServiceFiles('META-INF/services/java.sql.Driver')
 		zip64 = true
 		exclude 'META-INF/MANIFEST.MF'
 		exclude 'META-INF/*.SF'
@@ -114,9 +97,6 @@ configure(allprojects){
 	}
 
 	dependencies {
-		logViewerMinifier 'com.google.javascript:closure-compiler:v20230802'
-		logViewerMinifier 'com.helger:ph-css:7.0.5'
-
 		annotationProcessor name: 'package-compileonly-sdk', version: '1.7.0'
 		compileOnly name: 'package-compileonly-sdk', version: '1.7.0'
 
@@ -136,15 +116,34 @@ configure(allprojects){
 
 		// https://mvnrepository.com/artifact/commons-io/commons-io
 		implementation 'commons-io:commons-io:2.22.0'
-		// https://mvnrepository.com/artifact/org.apache.poi/poi-ooxml
-		implementation 'org.apache.poi:poi-ooxml:5.5.1'
+	}
 
-		// https://mvnrepository.com/artifact/org.apache.commons/commons-csv
-		implementation 'org.apache.commons:commons-csv:1.14.1'
+	// Runs the viewer script on the template that ships in the JAR. Skipped when node is not installed.
+	def viewerScriptTest = tasks.register('viewerScriptTest', Exec) {
+		description = 'Runs src/test/js/dialog-dismiss.test.js on the packaged log viewer.'
+		dependsOn processResources
+		commandLine 'node', file('src/test/js/dialog-dismiss.test.js').absolutePath,
+				layout.buildDirectory.file('resources/main/templates/log.html').get().asFile.absolutePath
+		onlyIf {
+			def found = false
+			try {
+				def node = new ProcessBuilder('node', '--version').redirectErrorStream(true).start()
+				node.inputStream.text
+				found = node.waitFor() == 0
+			} catch (IOException ignored) {
+			}
+			if (!found) logger.lifecycle('Skipping viewerScriptTest: node was not found on PATH.')
+			found
+		}
 	}
 
 	test {
 		useTestNG()
+		dependsOn viewerScriptTest
+		// Test side effects stay in build/. LC_ALL keeps non-ASCII file names working on Linux.
+		environment 'LOCALAPPDATA', layout.buildDirectory.dir('test-appdata').get().asFile
+		environment 'LC_ALL', 'C.UTF-8'
+		systemProperty 'helios.outbox.directory', layout.buildDirectory.dir('test-outbox').get().asFile
 		testLogging {
 			// Print each test as it starts and finishes, plus everything the
 			// test wrote to System.out / System.err (including log4j output

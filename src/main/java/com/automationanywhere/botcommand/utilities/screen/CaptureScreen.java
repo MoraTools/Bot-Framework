@@ -2,7 +2,6 @@ package com.automationanywhere.botcommand.utilities.screen;
 
 import com.automationanywhere.botcommand.exception.BotCommandException;
 import org.apache.commons.io.FilenameUtils;
-import org.apache.commons.lang3.StringUtils;
 
 import javax.imageio.ImageIO;
 import java.awt.*;
@@ -19,9 +18,9 @@ import java.nio.file.Paths;
 
 public class CaptureScreen {
 
-    public static void captureDesktop(String filePath, boolean isOverwriteFile) {
+    public static void captureDesktop(String filePath) {
         try {
-            if (StringUtils.isBlank(filePath)) {
+            if (filePath == null || filePath.isBlank()) {
                 throw new BotCommandException("Empty screenshot path provided");
             }
 
@@ -32,10 +31,6 @@ public class CaptureScreen {
             Path parentDir = path.getParent();
             if (parentDir != null) {
                 Files.createDirectories(parentDir);
-            }
-
-            if (!isOverwriteFile && file.exists()) {
-                throw new BotCommandException("Screenshot path already exists " + path);
             }
 
             Robot robot = new Robot();

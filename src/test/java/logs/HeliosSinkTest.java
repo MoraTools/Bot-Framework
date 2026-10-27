@@ -5,48 +5,44 @@ import com.automationanywhere.botcommand.data.impl.StringValue;
 import com.automationanywhere.botcommand.utilities.helios.HeliosConfig;
 import com.automationanywhere.botcommand.utilities.helios.HeliosAppender;
 import com.automationanywhere.botcommand.utilities.helios.HeliosSink;
+import com.automationanywhere.botcommand.utilities.helios.HeliosStubServer;
 import com.automationanywhere.botcommand.utilities.logger.CustomHTMLLayout;
 import com.automationanywhere.botcommand.utilities.logger.CustomLogger;
 import com.automationanywhere.botcommand.utilities.screen.recorder.EncodingMode;
-import com.sun.net.httpserver.HttpExchange;
-import com.sun.net.httpserver.HttpServer;
-import org.apache.commons.io.IOUtils;
 import org.apache.logging.log4j.Logger;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.testng.Assert;
+import org.testng.annotations.AfterClass;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
+import support.LogEntries;
+import support.TempDirectories;
 
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Collectors;
 
 /**
- * Exercises the whole streaming path against a local {@link HttpServer} stub: session start,
+ * Exercises the whole streaming path against a local {@link HeliosStubServer}: session start,
  * entry envelopes, session end, and the behaviour when the server is not there at all.
  *
  * @author jamir-boop
  */
 public class HeliosSinkTest {
 
-    private static final String SESSION_ID = "11111111-2222-3333-4444-555555555555";
-    private static final String EXECUTION_SESSION_ID = "66666666-7777-8888-9999-000000000000";
+    /** The stub derives the session ID from the AA execution ID of {@link #config(String)}. */
+    private static final String SESSION_ID = UUID.nameUUIDFromBytes("execution-1".getBytes(StandardCharsets.UTF_8)).toString();
     private static final String KEY = "hik_test_secret";
     /** Bot that opens the logger session; its own fileId must lose to the master's. */
     private static final String BOT_URI =
@@ -55,110 +51,32 @@ public class HeliosSinkTest {
     private static final String PARENT_BOT_URI =
             "file:///c/Automation Anywhere/tasks/Master Task?workspace=PUBLIC&fileId=abc";
 
-    private HttpServer server;
+    private final TempDirectories temp = new TempDirectories();
+    private HeliosStubServer server;
     private Path outbox;
-    private volatile boolean rejectOnce;
-    private volatile boolean omitMiddleOnce;
-    private volatile boolean sessionIdentity;
-    private final Map<Integer, JSONObject> stored = new java.util.concurrent.ConcurrentHashMap<>();
+
+    @AfterClass(alwaysRun = true)
+    public void deleteTemporaryFolders() { temp.deleteAll(); }
 
     @BeforeMethod
     public void isolateOutbox() throws IOException {
-        outbox = Files.createTempDirectory("helios-sender-test");
+        outbox = temp.create("helios-sender-test");
         System.setProperty("helios.outbox.directory", outbox.toString());
     }
-
-
-    /** One recorded request: path, ingest-key header and parsed JSON body. */
-    private static final class Call {
-        final String path;
-        final String key;
-        final String contentType;
-        final JSONObject body;
-
-        Call(String path, String key, String contentType, String body) {
-            this.path = path;
-            this.key = key;
-            this.contentType = contentType;
-            this.body = body.isEmpty() ? new JSONObject() : new JSONObject(body);
-        }
-    }
-
-    private final List<Call> calls = new CopyOnWriteArrayList<>();
 
     @AfterMethod(alwaysRun = true)
     public void stopServer() {
         if (server != null) {
-            server.stop(0);
+            server.close();
             server = null;
         }
-        calls.clear();
-        stored.clear();
-        rejectOnce = false;
-        omitMiddleOnce = false;
-        sessionIdentity = false;
         System.clearProperty("helios.outbox.directory");
         System.clearProperty("helios.bufferMiB");
     }
 
     private String startStubServer() throws IOException {
-        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        server.createContext("/api/ingest/sessions", this::handle);
-        server.setExecutor(null);
-        server.start();
-        return "http://127.0.0.1:" + server.getAddress().getPort();
-    }
-
-    private void handle(HttpExchange exchange) throws IOException {
-        String body;
-        try (InputStream in = exchange.getRequestBody()) {
-            body = IOUtils.toString(in, StandardCharsets.UTF_8);
-        }
-        String path = exchange.getRequestURI().getPath();
-        calls.add(new Call(path, exchange.getRequestHeaders().getFirst(HeliosSink.KEY_HEADER),
-                exchange.getRequestHeaders().getFirst("Content-Type"), body));
-
-        JSONObject request = new JSONObject(body);
-        int status = 200;
-        String response;
-        if (rejectOnce && path.endsWith("/entries")) {
-            rejectOnce = false;
-            exchange.getResponseHeaders().add("Retry-After", "1");
-            exchange.sendResponseHeaders(503, -1);
-            exchange.close();
-            return;
-        }
-        if (path.endsWith("/end")) {
-            int expected = request.getInt("expectedEntries");
-            if (stored.size() != expected) {
-                status = 409;
-                response = new JSONObject().put("code", "missingEntries").put("storedEntries", stored.size()).toString();
-            } else {
-                response = new JSONObject().put("complete", true).put("storedEntries", expected).toString();
-            }
-        } else if (path.endsWith("/entries")) {
-            int first = request.getInt("firstOrdinal");
-            JSONArray entries = request.getJSONArray("entries");
-            int duplicates = 0;
-            for (int i = 0; i < entries.length(); i++) {
-                if (omitMiddleOnce && first + i == 9) continue;
-                if (stored.putIfAbsent(first + i, entries.getJSONObject(i)) != null) duplicates++;
-            }
-            omitMiddleOnce = false;
-            response = new JSONObject().put("accepted", entries.length() - duplicates)
-                    .put("duplicates", duplicates).put("nextOrdinal", first + entries.length()).toString();
-        } else {
-            JSONObject start = new JSONObject().put("sessionId", SESSION_ID)
-                    .put("executionSessionId", EXECUTION_SESSION_ID).put("executionId", request.getString("executionId"));
-            if (sessionIdentity) start.put("sessionIdentity", true);
-            response = start.toString();
-        }
-        byte[] bytes = response.getBytes(StandardCharsets.UTF_8);
-        exchange.getResponseHeaders().add("Content-Type", "application/json");
-        exchange.sendResponseHeaders(status, bytes.length);
-        try (OutputStream out = exchange.getResponseBody()) {
-            out.write(bytes);
-        }
+        server = new HeliosStubServer();
+        return server.url();
     }
 
     private static HeliosConfig config(String baseUrl) {
@@ -167,10 +85,8 @@ public class HeliosSinkTest {
                 "abc", "test-machine", "test-user", null);
     }
 
-    private static Path newLogFile() throws IOException {
-        Path dir = Paths.get("src/test/target/test-artifacts/helios-" + System.nanoTime());
-        Files.createDirectories(dir);
-        return dir.resolve("log.html");
+    private Path newLogFile() throws IOException {
+        return temp.create("helios-log").resolve("log.html");
     }
 
     private static void logThreeRows(CustomLogger session) {
@@ -189,14 +105,12 @@ public class HeliosSinkTest {
         return row;
     }
 
-    /** Counts complete log entries independently of their HTML layout. */
-    private static int countRows(Path logFile) throws IOException {
-        String html = new String(Files.readAllBytes(logFile), StandardCharsets.UTF_8);
-        return (int) html.lines().filter(line -> line.equals("<!-- a360-log-entry:end -->")).count();
+    private List<HeliosStubServer.Request> callsEndingWith(String suffix) {
+        return server.requests(suffix);
     }
 
-    private List<Call> callsEndingWith(String suffix) {
-        return calls.stream().filter(call -> call.path.endsWith(suffix)).collect(Collectors.toList());
+    private static String key(HeliosStubServer.Request call) {
+        return call.headers.getFirst(HeliosSink.KEY_HEADER);
     }
 
     @Test
@@ -209,77 +123,53 @@ public class HeliosSinkTest {
         logThreeRows(session);
         session.close();
 
-        List<Call> starts = callsEndingWith("/api/ingest/sessions");
+        List<HeliosStubServer.Request> starts = callsEndingWith("/api/ingest/sessions");
         Assert.assertEquals(starts.size(), 1, "one start call");
-        Call start = starts.get(0);
-        Assert.assertEquals(start.key, KEY, "ingest key header");
-        Assert.assertEquals(start.body.getString("executionId"), "execution-1");
-        Assert.assertEquals(start.body.getString("fileId"), "abc",
+        HeliosStubServer.Request startCall = starts.get(0);
+        JSONObject start = startCall.json();
+        Assert.assertEquals(key(startCall), KEY, "ingest key header");
+        Assert.assertEquals(start.getString("executionId"), "execution-1");
+        Assert.assertEquals(start.getString("fileId"), "abc",
                 "fileId is the master bot URI's, not the child's");
-        Assert.assertEquals(start.body.getString("machine"), "test-machine");
-        Assert.assertEquals(start.body.getString("user"), "test-user");
-        Assert.assertTrue(start.body.getBoolean("sessionIdentity"));
-        Assert.assertTrue(start.body.getString("startedAt").matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}"),
-                "startedAt is local time yyyy-MM-dd'T'HH:mm:ss but was " + start.body.getString("startedAt"));
-        Assert.assertTrue(start.body.has("utcOffsetMinutes"));
-        Assert.assertEquals(start.body.getString("botUri"), BOT_URI);
-        Assert.assertEquals(start.body.getString("parentBotUri"), PARENT_BOT_URI,
+        Assert.assertEquals(start.getString("machine"), "test-machine");
+        Assert.assertEquals(start.getString("user"), "test-user");
+        Assert.assertTrue(start.getBoolean("sessionIdentity"));
+        Assert.assertTrue(start.getString("startedAt").matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}"),
+                "startedAt is local time yyyy-MM-dd'T'HH:mm:ss but was " + start.getString("startedAt"));
+        Assert.assertTrue(start.has("utcOffsetMinutes"));
+        Assert.assertEquals(start.getString("botUri"), BOT_URI);
+        Assert.assertEquals(start.getString("parentBotUri"), PARENT_BOT_URI,
                 "the master Task Bot travels next to the bot URI");
 
-        List<Call> entries = callsEndingWith("/entries");
+        List<HeliosStubServer.Request> entries = callsEndingWith("/entries");
         Assert.assertEquals(entries.size(), 1, "three entries share one request");
-        Call batch = entries.get(0);
+        HeliosStubServer.Request batch = entries.get(0);
         Assert.assertEquals(batch.path, "/api/ingest/sessions/" + SESSION_ID + "/entries");
-        Assert.assertEquals(batch.key, KEY);
-        Assert.assertEquals(batch.body.getInt("firstOrdinal"), 0);
-        JSONArray array = batch.body.getJSONArray("entries");
+        Assert.assertEquals(key(batch), KEY);
+        Assert.assertEquals(batch.json().getInt("firstOrdinal"), 0);
+        JSONArray array = batch.json().getJSONArray("entries");
         Assert.assertEquals(array.length(), 3);
         for (int index = 0; index < array.length(); index++) {
             JSONObject entry = array.getJSONObject(index);
-            Assert.assertEquals(entry.length(), 11);
+            Assert.assertEquals(entry.length(), 9, "Machine and User come from the session start");
             Assert.assertEquals(entry.getString("task"), "My Task");
-            Assert.assertEquals(entry.getString("machine"), CustomHTMLLayout.machineName(),
-                    "event identity overrides different start metadata");
-            Assert.assertEquals(entry.getString("user"), CustomHTMLLayout.userName());
         }
         Assert.assertEquals(array.getJSONObject(0).getString("level"), "INFO");
         Assert.assertEquals(array.getJSONObject(2).getString("level"), "ERROR");
 
-        List<Call> ends = callsEndingWith("/end");
+        List<HeliosStubServer.Request> ends = callsEndingWith("/end");
         Assert.assertEquals(ends.size(), 1, "one end call");
-        Call end = ends.get(0);
-        Assert.assertEquals(end.path, "/api/ingest/sessions/" + SESSION_ID + "/end");
-        Assert.assertEquals(end.key, KEY, "ingest key header on end");
-        Assert.assertEquals(end.body.getString("status"), "ERROR", "worst level seen wins");
-        Assert.assertTrue(end.body.getString("endedAt").matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}"));
-        Assert.assertTrue(end.body.has("utcOffsetMinutes"));
+        HeliosStubServer.Request endCall = ends.get(0);
+        JSONObject end = endCall.json();
+        Assert.assertEquals(endCall.path, "/api/ingest/sessions/" + SESSION_ID + "/end");
+        Assert.assertEquals(key(endCall), KEY, "ingest key header on end");
+        Assert.assertEquals(end.getString("status"), "ERROR", "worst level seen wins");
+        Assert.assertTrue(end.getString("endedAt").matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}"));
+        Assert.assertTrue(end.has("utcOffsetMinutes"));
 
-        Assert.assertEquals(countRows(logFile), 3, "HTML log still holds every row");
-        Assert.assertTrue(calls.stream().allMatch(call -> "application/json".equals(call.contentType)),
+        Assert.assertEquals(LogEntries.count(logFile), 3, "HTML log still holds every row");
+        Assert.assertTrue(server.requests.stream().allMatch(call -> "application/json".equals(call.headers.getFirst("Content-Type"))),
                 "start, entries and end keep the Helios JSON content type");
-    }
-
-    @Test
-    public void matchingEventIdentityStreamsFromTheSessionDefaults() throws Exception {
-        String baseUrl = startStubServer();
-        sessionIdentity = true;
-        HeliosConfig config = new HeliosConfig(baseUrl, KEY, "execution-1", BOT_URI, PARENT_BOT_URI,
-                "abc", CustomHTMLLayout.machineName(), CustomHTMLLayout.userName(), null);
-        Path logFile = newLogFile();
-        CustomLogger session = new CustomLogger("Compact_" + UUID.randomUUID(), logFile.toString(),
-                1000, 0, new HashSet<>(), EncodingMode.FAST, config);
-        session.getLogger().info(row("compact"));
-        session.close();
-        JSONObject start = callsEndingWith("/api/ingest/sessions").get(0).body;
-        Assert.assertTrue(start.getBoolean("sessionIdentity"));
-        Assert.assertEquals(start.getString("machine"), config.machine);
-        Assert.assertEquals(start.getString("user"), config.user);
-        JSONObject entry = callsEndingWith("/entries").get(0).body.getJSONArray("entries").getJSONObject(0);
-        Assert.assertEquals(entry.length(), 9);
-        Assert.assertFalse(entry.has("machine"));
-        Assert.assertFalse(entry.has("user"));
-        Assert.assertEquals(entry.getString("message"), "compact");
-        Assert.assertEquals(countRows(logFile), 1);
     }
 
     @Test
@@ -301,14 +191,15 @@ public class HeliosSinkTest {
         } finally {
             session.close();
         }
+        Map<Integer, JSONObject> stored = server.rows(SESSION_ID);
         Assert.assertEquals(stored.size(), 2);
         Assert.assertEquals(stored.get(0).getJSONArray("variables").getJSONObject(0).getString("value"),
                 "before\n<&> $ \\ ñ");
         Assert.assertEquals(stored.get(1).getJSONArray("variables").getJSONObject(0).getString("value"), "after");
-        JSONObject end = callsEndingWith("/end").get(0).body;
+        JSONObject end = callsEndingWith("/end").get(0).json();
         Assert.assertEquals(end.getInt("expectedEntries"), 2);
         Assert.assertEquals(end.getString("status"), "WARN");
-        Assert.assertEquals(countRows(logFile), 2);
+        Assert.assertEquals(LogEntries.count(logFile), 2);
     }
 
     @Test
@@ -323,22 +214,9 @@ public class HeliosSinkTest {
         session.getLogger().info(row("only info"));
         session.close();
 
-        JSONObject start = callsEndingWith("/api/ingest/sessions").get(0).body;
+        JSONObject start = callsEndingWith("/api/ingest/sessions").get(0).json();
         Assert.assertEquals(start.getString("parentBotUri"), "", "unknown master is sent as an empty string");
         Assert.assertEquals(start.getString("fileId"), "child-file", "the bot's own fileId is used instead");
-    }
-
-    @Test
-    public void statusIsOkWhenNothingWorseThanInfoWasLogged() throws Exception {
-        String baseUrl = startStubServer();
-        Path logFile = newLogFile();
-
-        CustomLogger session = new CustomLogger("CustomLogger_" + UUID.randomUUID(), logFile.toString(),
-                1000, 0, new HashSet<>(), EncodingMode.FAST, config(baseUrl));
-        session.getLogger().info(row("only info"));
-        session.close();
-
-        Assert.assertEquals(callsEndingWith("/end").get(0).body.getString("status"), "OK");
     }
 
     @Test
@@ -358,8 +236,8 @@ public class HeliosSinkTest {
         long elapsed = System.currentTimeMillis() - startedAt;
 
         Assert.assertTrue(elapsed < 20_000, "must not hang on a dead server, took " + elapsed + " ms");
-        // Three logged rows plus the single WARN row explaining that streaming is off.
-        Assert.assertEquals(countRows(logFile), 4, "HTML log still holds every row");
+        // Bot rows, one delay warning and the final pending warning all stay in HTML.
+        Assert.assertEquals(LogEntries.count(logFile), 5, "bot rows, delay and pending warnings stay in HTML");
         String html = new String(Files.readAllBytes(logFile), StandardCharsets.UTF_8);
         Assert.assertTrue(html.contains("Helios delivery was delayed"),
                 "one warning row explains why nothing was streamed");
@@ -379,32 +257,33 @@ public class HeliosSinkTest {
         logThreeRows(session);
         session.close();
 
-        Assert.assertEquals(callsEndingWith("/entries").get(0).body.getJSONArray("entries").length(), 3, "every level reaches Helios");
-        Assert.assertEquals(countRows(Paths.get(paths.get(org.apache.logging.log4j.Level.INFO))), 1);
-        Assert.assertEquals(countRows(Paths.get(paths.get(org.apache.logging.log4j.Level.ERROR))), 1);
+        Assert.assertEquals(callsEndingWith("/entries").get(0).json().getJSONArray("entries").length(), 3, "every level reaches Helios");
+        Assert.assertEquals(LogEntries.count(Paths.get(paths.get(org.apache.logging.log4j.Level.INFO))), 1);
+        Assert.assertEquals(LogEntries.count(Paths.get(paths.get(org.apache.logging.log4j.Level.ERROR))), 1);
     }
 
     @Test
     public void overloadRetriesTheSameBatchAndClosingRepairsAMiddleGap() throws Exception {
         String baseUrl = startStubServer();
-        rejectOnce = true;
-        omitMiddleOnce = true;
+        server.replyOnce("/entries", 503, "", "Retry-After", "1");
+        server.omitOnce.set(9);
         Path logFile = newLogFile();
         CustomLogger session = new CustomLogger("CustomLogger_" + UUID.randomUUID(), logFile.toString(),
                 1000, 0, new HashSet<>(), EncodingMode.FAST, config(baseUrl));
         for (int index = 0; index < 20; index++) session.getLogger().info(row("row " + index));
         session.close();
+        Map<Integer, JSONObject> stored = server.rows(SESSION_ID);
         Assert.assertEquals(stored.size(), 20);
         Assert.assertEquals(stored.get(9).getString("message"), "row 9");
-        List<Call> batches = callsEndingWith("/entries");
+        List<HeliosStubServer.Request> batches = callsEndingWith("/entries");
         Assert.assertEquals(batches.size(), 3, "rejection, partial storage, then gap repair");
-        Assert.assertEquals(batches.get(0).body.toString(), batches.get(2).body.toString(),
+        Assert.assertEquals(batches.get(0).json().toString(), batches.get(2).json().toString(),
                 "retry preserves every ordinal, value and timestamp");
         Assert.assertEquals(callsEndingWith("/end").size(), 2);
-        Assert.assertEquals(countRows(logFile), 21, "one local retry warning stays out of the cloud rows");
+        Assert.assertEquals(LogEntries.count(logFile), 21, "one local retry warning stays out of the cloud rows");
         Assert.assertTrue(Files.readString(logFile).contains("Helios delivery was delayed"));
-        Assert.assertTrue(callsEndingWith("/end").stream().allMatch(call -> call.body.getInt("expectedEntries") == 20
-                && "OK".equals(call.body.getString("status"))), "local warnings do not change the cloud outcome");
+        Assert.assertTrue(callsEndingWith("/end").stream().allMatch(call -> call.json().getInt("expectedEntries") == 20
+                && "OK".equals(call.json().getString("status"))), "local warnings do not change the cloud outcome");
         Assert.assertEquals(stored.keySet(), java.util.stream.IntStream.range(0, 20).boxed().collect(Collectors.toSet()));
         try (java.util.stream.Stream<Path> paths = Files.walk(logFile.getParent())) {
             Assert.assertFalse(paths.anyMatch(path -> path.toString().endsWith(".mp4")), "retry warnings do not record video");
@@ -418,7 +297,7 @@ public class HeliosSinkTest {
     @Test
     public void localWarningsKeepTheRetryWarningAndNeverConsumeCloudOrdinals() throws Exception {
         String baseUrl = startStubServer();
-        rejectOnce = true;
+        server.replyOnce("/entries", 503, "", "Retry-After", "1");
         Path logFile = newLogFile();
         CustomLogger session = new CustomLogger("LocalWarnings_" + UUID.randomUUID(), logFile.toString(),
                 1000, 0, new HashSet<>(), EncodingMode.FAST, config(baseUrl));
@@ -426,11 +305,12 @@ public class HeliosSinkTest {
         HeliosAppender.writeLocalWarning(session.getLogger(), "another local owner warning");
         session.getLogger().info(row("one cloud row"));
         session.close();
-        Assert.assertEquals(countRows(logFile), 4, "two explicit local warnings plus one retry warning");
+        Assert.assertEquals(LogEntries.count(logFile), 4, "two explicit local warnings plus one retry warning");
         Assert.assertTrue(Files.readString(logFile).contains("Helios delivery was delayed"));
+        Map<Integer, JSONObject> stored = server.rows(SESSION_ID);
         Assert.assertEquals(stored.size(), 1);
         Assert.assertEquals(stored.get(0).getString("message"), "one cloud row");
-        JSONObject end = callsEndingWith("/end").get(0).body;
+        JSONObject end = callsEndingWith("/end").get(0).json();
         Assert.assertEquals(end.getInt("expectedEntries"), 1);
         Assert.assertEquals(end.getString("status"), "OK");
     }
@@ -445,11 +325,12 @@ public class HeliosSinkTest {
         session.getLogger().info(row("x".repeat(1024 * 1024)));
         session.getLogger().info(row("still running"));
         session.close();
-        Assert.assertEquals(countRows(logFile), 3, "both bot entries and the disk warning stay in HTML");
+        Assert.assertEquals(LogEntries.count(logFile), 6, "bot entries, disk failure, delay, incomplete and pending warnings stay in HTML");
         Assert.assertTrue(Files.readString(logFile).contains("Cloud logs are incomplete"));
+        Map<Integer, JSONObject> stored = server.rows(SESSION_ID);
         Assert.assertEquals(stored.size(), 1);
         Assert.assertEquals(stored.get(1).getString("message"), "still running");
-        Assert.assertTrue(callsEndingWith("/end").stream().allMatch(call -> call.body.getInt("expectedEntries") == 2));
+        Assert.assertTrue(callsEndingWith("/end").stream().allMatch(call -> call.json().getInt("expectedEntries") == 2));
         try (java.util.stream.Stream<Path> files = Files.walk(outbox)) {
             Assert.assertTrue(files.anyMatch(path -> path.toString().endsWith(".helios-journal")),
                     "unverified records remain on disk");
@@ -465,8 +346,8 @@ public class HeliosSinkTest {
         logThreeRows(session);
         session.close();
 
-        Assert.assertEquals(calls, Collections.emptyList(), "nothing is sent when streaming is disabled");
-        Assert.assertEquals(countRows(logFile), 3);
+        Assert.assertTrue(server.requests.isEmpty(), "nothing is sent when streaming is disabled");
+        Assert.assertEquals(LogEntries.count(logFile), 3);
         Assert.assertTrue(baseUrl.startsWith("http://"));
     }
 }

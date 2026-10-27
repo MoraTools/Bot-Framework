@@ -80,8 +80,9 @@ public class VariableCardParityTest {
                 scalars.add(decodedScalar(div));
             }
         }
-        Assert.assertEquals(scalars, java.util.Collections.nCopies(10, text),
-                "all scalar values retain CR, LF, tabs, leading/interior/trailing spaces and escapes");
+        Assert.assertEquals(scalars, List.of(text, "********", text, "********", text, "********",
+                        text, "********", text, "********"),
+                "string values retain CR, LF, tabs, leading/interior/trailing spaces and escapes; credentials show the mask");
     }
 
     private static Document parse(String html) throws Exception {

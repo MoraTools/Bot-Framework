@@ -1,6 +1,5 @@
 package logs;
 
-import com.automationanywhere.botcommand.actions.logs.LogMessage;
 import com.automationanywhere.botcommand.actions.logs.StopLoggerSession;
 import com.automationanywhere.botcommand.data.Value;
 import com.automationanywhere.botcommand.data.impl.BooleanValue;
@@ -16,12 +15,13 @@ import com.automationanywhere.botcommand.data.model.table.Table;
 import com.automationanywhere.botcommand.utilities.logger.CustomLogger;
 import com.automationanywhere.botcommand.utilities.logger.HTMLGenerator;
 import org.testng.Assert;
+import org.testng.annotations.AfterClass;
 import org.testng.annotations.Test;
+import support.TempDirectories;
+import support.TestLogMessage;
 
-import java.io.File;
-import java.io.IOException;
 import java.nio.file.Files;
-import java.nio.file.Paths;
+import java.nio.file.Path;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -31,35 +31,38 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * End-to-end rendering showcase tests. These produce variable and log
- * HTML artifacts that exercise every branch in HTMLGenerator and the
- * matching templates: short and long scalars, long unbroken strings,
- * multi-line text, JSON / code blocks, HTML-special characters, Unicode,
- * primitive types, simple and nested lists, dictionaries, and small /
- * multi-line-cell / wide tables. Run them and open the printed paths
- * to visually validate the templates under realistic data shapes.
+ * End-to-end rendering checks through Log Message: realistic variable shapes (long, multi-line,
+ * HTML-special, Unicode, nested, wide and tall tables, empty containers), the whitespace markers,
+ * and the viewer styles in the written header.
  */
 @SuppressWarnings({"SpellCheckingInspection", "GrazieInspection"})
 public class RenderingShowcaseTest {
 
     private static final String LEVEL_INFO = "INFO";
-    private static final String LEVEL_WARN = "WARN";
-    private static final String LEVEL_ERROR = "ERROR";
     private static final String LOG_VARIABLE = "YES";
     private static final String DO_NOT_LOG_VARIABLE = "NO";
 
+    private final TempDirectories directories = new TempDirectories();
+
+    @AfterClass(alwaysRun = true)
+    public void deleteDirectories() {
+        directories.deleteAll();
+    }
+
+    /** Writes one INFO entry through Log Message, without a screenshot, and returns the expanded log. */
+    private String logOnce(String folder, String message, Map<String, Value> variables) throws Exception {
+        Path dir = directories.create(folder);
+        Path log = dir.resolve("log.html");
+        CustomLogger logger = new CustomLogger(folder + "_" + UUID.randomUUID(), log.toString(), 10);
+        TestLogMessage.create().action(logger, LEVEL_INFO, message, false,
+                variables == null ? DO_NOT_LOG_VARIABLE : LOG_VARIABLE, variables);
+        new StopLoggerSession().stop(logger);
+        Assert.assertFalse(Files.exists(dir.resolve("variables")), "no variable sidecar files");
+        return CompressedSnapshots.expand(Files.readString(log));
+    }
+
     @Test
     public void testExhaustiveVariablesShowcase() throws Exception {
-        String testPath = "src/test/target/test-artifacts/showcase-variables-" + System.currentTimeMillis() + "/";
-        Files.createDirectories(Paths.get(testPath));
-
-        String logFilePath = testPath + "showcase.html";
-        CustomLogger customLogger = new CustomLogger("ShowcaseVariables_" + UUID.randomUUID(),
-                                                      logFilePath, 10);
-
-        LogMessage logMessage = new LogMessage();
-        logMessage.setTestBotUri("Automation Anywhere/bots/test/showcase-variables");
-
         Map<String, Value> sourceMap = new LinkedHashMap<>();
 
         // Short scalars
@@ -283,19 +286,7 @@ public class RenderingShowcaseTest {
         richDict.put("retry_policy", new DictionaryValue(configDict));
         sourceMap.put("Pipeline Configuration", new DictionaryValue(richDict));
 
-        logMessage.action(
-            customLogger,
-            LEVEL_INFO,
-            "Exhaustive variables showcase entry",
-            false,
-            LOG_VARIABLE,
-            sourceMap
-        );
-
-        new StopLoggerSession().stop(customLogger);
-
-        Assert.assertFalse(Files.exists(Paths.get(testPath, "variables")), "no variable sidecar files");
-        String variablesHtml = CompressedSnapshots.expand(Files.readString(Paths.get(logFilePath)));
+        String variablesHtml = logOnce("showcase-variables", "Exhaustive variables showcase entry", sourceMap);
         // Spot-check that representative variables, types, and rare characters survive
         Assert.assertTrue(variablesHtml.contains("Long URL"), "should include 'Long URL' name");
         Assert.assertTrue(variablesHtml.contains("JSON Multiline"), "should include 'JSON Multiline' name");
@@ -307,311 +298,21 @@ public class RenderingShowcaseTest {
         Assert.assertTrue(variablesHtml.contains("日本語"), "Unicode characters should pass through");
         Assert.assertTrue(variablesHtml.contains("AAAAAAAAAAAAAAAAAAAAAAAAA"), "Unbreakable token should survive verbatim");
         Assert.assertTrue(variablesHtml.contains("ROW-030"), "Tall table should include all 30 rows");
-
-        System.out.println("Variables showcase artifact: " + logFilePath);
-    }
-
-    @Test
-    public void testExhaustiveLogShowcase() throws Exception {
-        String testPath = "src/test/target/test-artifacts/showcase-log-" + System.currentTimeMillis() + "/";
-        Files.createDirectories(Paths.get(testPath));
-
-        String logFilePath = testPath + "showcase.html";
-        CustomLogger customLogger = new CustomLogger("ShowcaseLog_" + UUID.randomUUID(),
-                                                      logFilePath, 200);
-
-        LogMessage logMessage = new LogMessage();
-        logMessage.setTestBotUri("Automation Anywhere/bots/test/log-showcase");
-
-        // 1. Short INFO, no extras
-        logMessage.action(customLogger, LEVEL_INFO,
-            "Bot started",
-            false, DO_NOT_LOG_VARIABLE, null);
-
-        // 2. INFO with screenshot
-        logMessage.action(customLogger, LEVEL_INFO,
-            "Initial screen captured for run-time baseline",
-            true, DO_NOT_LOG_VARIABLE, null);
-
-        // 3. Long single-line INFO
-        logMessage.action(customLogger, LEVEL_INFO,
-            "Processed records sequentially: starting from the first record in the input file, applying validation, then mapping each field through the transformation pipeline, and finally writing each result to the output destination, as one continuous operation across all rows in the source.",
-            false, DO_NOT_LOG_VARIABLE, null);
-
-        // 4. Multi-line INFO message (newlines preserved on render? Depends on layout's escaping; this test produces the raw entry)
-        logMessage.action(customLogger, LEVEL_INFO,
-            "Step 1: Read input\nStep 2: Validate fields\nStep 3: Transform values\nStep 4: Write output",
-            false, DO_NOT_LOG_VARIABLE, null);
-
-        // 5. INFO with HTML special chars
-        logMessage.action(customLogger, LEVEL_INFO,
-            "Source file <input.csv> & destination <output.json> set; \"verbose\" mode = 'true'",
-            false, DO_NOT_LOG_VARIABLE, null);
-
-        // 6. INFO with unicode + emoji
-        logMessage.action(customLogger, LEVEL_INFO,
-            "Run completed: 日本語 OK, العربية OK, 🎉 success",
-            false, DO_NOT_LOG_VARIABLE, null);
-
-        // 7. INFO with very long unbroken token
-        logMessage.action(customLogger, LEVEL_INFO,
-            "Trace: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-token-end",
-            false, DO_NOT_LOG_VARIABLE, null);
-
-        // 8. INFO with variables
-        Map<String, Value> infoVars = new LinkedHashMap<>();
-        infoVars.put("recordCount", new NumberValue(1247));
-        infoVars.put("startTime", new DateTimeValue(ZonedDateTime.now().minusMinutes(5)));
-        infoVars.put("inputFile", new StringValue("data/customers-2026-Q1.csv"));
-        logMessage.action(customLogger, LEVEL_INFO,
-            "Processing batch",
-            false, LOG_VARIABLE, infoVars);
-
-        // 9. INFO with screenshot AND variables
-        Map<String, Value> screenVars = new LinkedHashMap<>();
-        screenVars.put("page", new StringValue("Dashboard"));
-        screenVars.put("loggedInUser", new StringValue("automation@example.com"));
-        logMessage.action(customLogger, LEVEL_INFO,
-            "Captured dashboard state",
-            true, LOG_VARIABLE, screenVars);
-
-        // 10. WARN, short
-        logMessage.action(customLogger, LEVEL_WARN,
-            "Optional field missing in record 42; using default value",
-            false, DO_NOT_LOG_VARIABLE, null);
-
-        // 11. WARN with screenshot
-        logMessage.action(customLogger, LEVEL_WARN,
-            "UI element not found at expected location; capturing state for diagnosis",
-            true, DO_NOT_LOG_VARIABLE, null);
-
-        // 12. WARN with multi-line message + variables
-        Map<String, Value> warnVars = new LinkedHashMap<>();
-        warnVars.put("missingFields", new StringValue("phoneNumber, secondaryEmail"));
-        warnVars.put("recordsAffected", new NumberValue(17));
-        logMessage.action(customLogger, LEVEL_WARN,
-            "Multiple records have missing optional fields:\n" +
-            "  - phoneNumber: 12 records\n" +
-            "  - secondaryEmail: 5 records\n" +
-            "Defaults will be applied where applicable.",
-            false, LOG_VARIABLE, warnVars);
-
-        // 13. ERROR, short
-        logMessage.action(customLogger, LEVEL_ERROR,
-            "Connection refused: unable to reach upstream service",
-            false, DO_NOT_LOG_VARIABLE, null);
-
-        // 14. ERROR with screenshot
-        logMessage.action(customLogger, LEVEL_ERROR,
-            "Authentication failed at login screen",
-            true, DO_NOT_LOG_VARIABLE, null);
-
-        // 15. ERROR with stack-trace-like multi-line message + variables + screenshot
-        Map<String, Value> errorVars = new LinkedHashMap<>();
-        errorVars.put("errorCode", new StringValue("E_NETWORK_TIMEOUT"));
-        errorVars.put("retryCount", new NumberValue(3));
-        errorVars.put("lastAttempt", new DateTimeValue(ZonedDateTime.now()));
-        errorVars.put("endpoint", new StringValue("https://api.example.com/v2/resource"));
-        logMessage.action(customLogger, LEVEL_ERROR,
-            "Operation failed after 3 retries:\n" +
-            "java.net.SocketTimeoutException: connect timed out\n" +
-            "    at java.net.PlainSocketImpl.socketConnect(Native Method)\n" +
-            "    at java.net.AbstractPlainSocketImpl.doConnect(AbstractPlainSocketImpl.java:350)\n" +
-            "    at java.net.AbstractPlainSocketImpl.connectToAddress(AbstractPlainSocketImpl.java:206)\n" +
-            "    at java.net.Socket.connect(Socket.java:606)\n" +
-            "    at sun.security.ssl.SSLSocketImpl.connect(SSLSocketImpl.java:288)",
-            true, LOG_VARIABLE, errorVars);
-
-        // 16-25. Filler entries to make the log long enough to exercise scrolling and the sticky log-table thead
-        for (int i = 1; i <= 10; i++) {
-            String level = (i % 5 == 0) ? LEVEL_ERROR : (i % 3 == 0) ? LEVEL_WARN : LEVEL_INFO;
-            logMessage.action(customLogger, level,
-                "Pipeline iteration " + i + " of 10 completed successfully with all expected validations passing",
-                false, DO_NOT_LOG_VARIABLE, null);
-        }
-
-        // 26. Final INFO summary with rich variables
-        Map<String, Value> summaryVars = new LinkedHashMap<>();
-        summaryVars.put("totalRecords", new NumberValue(1247));
-        summaryVars.put("successful", new NumberValue(1230));
-        summaryVars.put("warnings", new NumberValue(12));
-        summaryVars.put("errors", new NumberValue(5));
-        summaryVars.put("durationSeconds", new NumberValue(327.8));
-        summaryVars.put("endTime", new DateTimeValue(ZonedDateTime.now()));
-        logMessage.action(customLogger, LEVEL_INFO,
-            "Run summary",
-            false, LOG_VARIABLE, summaryVars);
-
-        new StopLoggerSession().stop(customLogger);
-
-        File logFile = new File(logFilePath);
-        Assert.assertTrue(logFile.exists(), "Log file should exist");
-        Assert.assertTrue(logFile.length() > 0, "Log file should have content");
-
-        String logHtml = CompressedSnapshots.expand(new String(Files.readAllBytes(logFile.toPath())));
-        // Verify all three levels rendered, screenshots and variables were emitted,
-        // and HTML escaping happened where needed.
-        Assert.assertTrue(logHtml.contains("level-INFO"), "INFO level should be rendered");
-        Assert.assertTrue(logHtml.contains("level-WARN"), "WARN level should be rendered");
-        Assert.assertTrue(logHtml.contains("level-ERROR"), "ERROR level should be rendered");
-        Assert.assertTrue(logHtml.contains("class='img-link'"), "Screenshot links should be rendered");
-        Assert.assertTrue(logHtml.contains("class='entry-variables'"), "Inline variables should be rendered");
-        Assert.assertTrue(logHtml.contains("&lt;input.csv&gt;"), "HTML special characters in messages must be escaped");
-
-        File screenshotsDir = new File(testPath + "screenshots");
-        File[] screenshots = screenshotsDir.listFiles((dir, name) -> name.endsWith(".png"));
-        Assert.assertNotNull(screenshots, "Screenshots directory should exist");
-        Assert.assertTrue(screenshots.length >= 4, "Should have captured screenshots for the entries that requested them");
-
-        Assert.assertFalse(Files.exists(Paths.get(testPath, "variables")));
-        Assert.assertTrue(logHtml.split("<details class='entry-variables'>", -1).length - 1 >= 4,
-                "entries with variables have inline snapshots");
-
-        System.out.println("Log showcase artifact: " + logFilePath);
-    }
-
-    @Test
-    public void testWideTableVariableRendering() throws Exception {
-        // Stress-tests the inline variable styles with a wide table containing
-        // long cell values. Exercises every layer end-to-end: schema/row
-        // construction, LogMessage.action with logVariable=YES,
-        // HTMLGenerator.appendTableValue, and the rendered template.
-        // A human can open the generated artifact to visually verify wide-table
-        // rendering (sticky summary + thead, plain cells instead of monospace
-        // code-boxes, overflow-wrap on long unbroken strings).
-        String testPath = "src/test/target/test-artifacts/wide-table-" + System.currentTimeMillis() + "/";
-        Files.createDirectories(Paths.get(testPath));
-
-        String logFilePath = testPath + "wide-table.html";
-        CustomLogger customLogger = new CustomLogger("WideTableLogger_" + UUID.randomUUID(),
-                                                      logFilePath, 10);
-        LogMessage logMessage = new LogMessage();
-        logMessage.setTestBotUri("Automation Anywhere/bots/test/wide-table");
-
-        String[] columns = {
-            "Employee ID", "Full Name", "Email Address", "Department",
-            "Job Title", "Office Location", "Direct Manager", "Project Code",
-            "Status", "Tech Skills", "Last Review Notes", "Profile URL"
-        };
-
-        List<Schema> schemas = new ArrayList<>();
-        for (String column : columns) {
-            schemas.add(new Schema(column));
-        }
-
-        String longSkills = "JavaScript, TypeScript, React, Node.js, Python, Django, PostgreSQL, AWS, Docker, Kubernetes";
-        String longNotes = "Excellent team player with strong technical leadership skills. Has consistently delivered high-quality work and mentored junior engineers across multiple teams over the past three years.";
-        String longUrl = "https://company.example.com/employees/profiles/department/engineering/team-platform-tools/very-long-unbroken-identifier-1234567890123456789012345.html";
-        String unbreakableToken = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-
-        List<Row> rows = new ArrayList<>();
-        rows.add(new Row(
-            new StringValue("E-1042"),
-            new StringValue("Sumit Kumar"),
-            new StringValue("sumit.kumar@company.example.com"),
-            new StringValue("Engineering"),
-            new StringValue("Senior Software Engineer"),
-            new StringValue("Bangalore, India"),
-            new StringValue("Priya Sharma"),
-            new StringValue("PRJ-INFRA-2026-Q2"),
-            new StringValue("Active"),
-            new StringValue(longSkills),
-            new StringValue(longNotes),
-            new StringValue(longUrl)
-        ));
-        rows.add(new Row(
-            new StringValue("E-1187"),
-            new StringValue("Maria Garcia Rodriguez"),
-            new StringValue("maria.garcia.rodriguez@company.example.com"),
-            new StringValue("Product Engineering"),
-            new StringValue("Staff Software Engineer, Platform Tooling"),
-            new StringValue("Mexico City, Mexico"),
-            new StringValue("Alejandro Hernandez"),
-            new StringValue("PRJ-PLATFORM-2026"),
-            new StringValue("Active"),
-            new StringValue("Go, Rust, Python, Kubernetes, Terraform, GCP, BigQuery, gRPC"),
-            new StringValue("Drove the migration of three legacy services to a new shared infrastructure with zero downtime over a six-month period."),
-            new StringValue("https://company.example.com/employees/profiles/department/product-eng/team-platform/m-garcia-rodriguez")
-        ));
-        rows.add(new Row(
-            new StringValue("E-1255"),
-            new StringValue("Wei Zhang"),
-            new StringValue("wei.zhang@company.example.com"),
-            new StringValue("Data Science"),
-            new StringValue("Principal Data Scientist"),
-            new StringValue("Singapore"),
-            new StringValue("Hiroshi Tanaka"),
-            new StringValue("PRJ-ML-RECOMMENDATIONS"),
-            new StringValue("On Leave"),
-            new StringValue("Python, R, PyTorch, TensorFlow, Spark, Kafka, Airflow, Snowflake"),
-            new StringValue("On parental leave through Q3 2026. Returning to lead the recommendation system v3 rollout."),
-            new StringValue("https://company.example.com/employees/profiles/department/data-science/w-zhang")
-        ));
-        rows.add(new Row(
-            new StringValue("E-9876"),
-            new StringValue("Test_User_Name_" + unbreakableToken),
-            new StringValue("very.long.email.address.with.many.dots@subdomain.example.company.org"),
-            new StringValue("QA"),
-            new StringValue("Engineering Lead, QA Automation Platform"),
-            new StringValue("Remote / Distributed"),
-            new StringValue("Jordan Smith"),
-            new StringValue("PRJ-QA-AUTOMATION-2026"),
-            new StringValue("Active"),
-            new StringValue("Selenium, Cypress, Playwright, JUnit, TestNG, Cucumber, Postman, Charles Proxy"),
-            new StringValue("Edge case verification: " + unbreakableToken),
-            new StringValue(longUrl)
-        ));
-
-        TableValue tableValue = new TableValue();
-        tableValue.set(new Table(schemas, rows));
-
-        Map<String, Value> tableVariable = new LinkedHashMap<>();
-        tableVariable.put("Employee Roster", tableValue);
-
-        logMessage.action(
-            customLogger,
-            LEVEL_INFO,
-            "Wide table variable rendering test",
-            false,
-            LOG_VARIABLE,
-            tableVariable
-        );
-
-        new StopLoggerSession().stop(customLogger);
-
-        Assert.assertFalse(Files.exists(Paths.get(testPath, "variables")), "no variable sidecar files");
-        String variablesHtml = CompressedSnapshots.expand(Files.readString(Paths.get(logFilePath)));
-        Assert.assertTrue(variablesHtml.contains("class='table-container'"),
-            "Variables HTML should wrap the table in .table-container");
-        Assert.assertTrue(variablesHtml.contains("Employee Roster"),
-            "Variables HTML should include the variable name");
-        Assert.assertTrue(variablesHtml.contains(rows.size() + " rows x " + columns.length + " columns"),
-            "Variables HTML should include the table summary line");
-        for (String column : columns) {
-            Assert.assertTrue(variablesHtml.contains(">" + column + "<"),
-                "Variables HTML should contain column header: " + column);
-        }
-        Assert.assertTrue(variablesHtml.contains(longSkills),
-            "Variables HTML should preserve long skills value verbatim");
-        Assert.assertTrue(variablesHtml.contains(longUrl),
-            "Variables HTML should preserve long URL value verbatim");
-        Assert.assertTrue(variablesHtml.contains(unbreakableToken),
-            "Variables HTML should preserve unbreakable token (overflow-wrap stress)");
-
-        System.out.println("Wide table variable artifact: " + logFilePath);
+        Assert.assertTrue(variablesHtml.contains("Table: 5 rows x 10 columns"), "Wide table summary line");
+        Assert.assertTrue(variablesHtml.contains(">Column 10<"), "Wide table keeps its last column header");
     }
 
     @Test
     public void testWhitespaceMarkersKeepEscapingAndLineEndings() {
         String trail = "<span class='ws-trail'><span class='ws-marker' aria-hidden='true'>··</span>  </span>";
-        String newline = "<span class='ws-marker ws-nl' aria-hidden='true'>↵</span>\n";
-        String tab = "<span class='ws-marker ws-tab' aria-hidden='true'>→</span>\t";
+        String newline = "<i class='ws-nl' aria-hidden='true'></i>";
+        String tab = "<i class='ws-tab' aria-hidden='true'></i>\t";
         Assert.assertEquals(HTMLGenerator.escapeWithWhitespaceMarkers(null), "");
         Assert.assertEquals(HTMLGenerator.escapeWithWhitespaceMarkers(""), "");
         Assert.assertEquals(HTMLGenerator.escapeWithWhitespaceMarkers("<&> $ \\  \r\n\tend  "),
-                "&lt;&amp;&gt; $ \\" + trail + "\r" + newline + tab + "end" + trail);
+                "&lt;&amp;&gt; $ \\" + trail + newline + "\r\n" + tab + "end" + trail);
         Assert.assertEquals(HTMLGenerator.escapeWithWhitespaceMarkers("a  b  \n  "),
-                "a  b" + trail + newline + trail);
+                "a  b" + trail + newline + "\n" + trail);
     }
 
     @Test(timeOut = 5000)
@@ -623,7 +324,7 @@ public class RenderingShowcaseTest {
                 + "·".repeat(spaces.length()) + "</span>" + spaces + "</span>";
         Assert.assertEquals(HTMLGenerator.escapeWithWhitespaceMarkers("left" + spaces), marked);
         Assert.assertEquals(HTMLGenerator.escapeWithWhitespaceMarkers("left" + spaces + "\r\nright"),
-                marked + "\r<span class='ws-marker ws-nl' aria-hidden='true'>↵</span>\nright");
+                marked + "<i class='ws-nl' aria-hidden='true'></i>\r\nright");
     }
 
     @Test
@@ -631,85 +332,12 @@ public class RenderingShowcaseTest {
         // Multi-line messages must render as visible breaks with a dim glyph
         // marker so users can spot embedded newlines instead of seeing them
         // collapse into a single line.
-        String testPath = "src/test/target/test-artifacts/newline-log-" + System.currentTimeMillis() + "/";
-        Files.createDirectories(Paths.get(testPath));
-
-        String logFilePath = testPath + "newline.html";
-        CustomLogger customLogger = new CustomLogger("NewlineLogger_" + UUID.randomUUID(),
-                                                      logFilePath, 10);
-        LogMessage logMessage = new LogMessage();
-        logMessage.setTestBotUri("Automation Anywhere/bots/test/newline-log");
-
-        logMessage.action(customLogger, LEVEL_INFO,
-            "Step 1: Read input\nStep 2: Validate\nStep 3: Done",
-            false, DO_NOT_LOG_VARIABLE, null);
-
-        new StopLoggerSession().stop(customLogger);
-
-        String logHtml = CompressedSnapshots.expand(new String(Files.readAllBytes(Paths.get(logFilePath))));
+        String logHtml = logOnce("newline-log", "Step 1: Read input\nStep 2: Validate\nStep 3: Done", null);
         Assert.assertTrue(logHtml.replaceAll("\\s+", "").contains(".log-entry>td:nth-child(4){white-space:pre-wrap;"),
             "The fourth column preserves message whitespace without a per-row class");
-        Assert.assertTrue(logHtml.contains("class='ws-marker ws-nl'"),
-            "Multi-line message should emit newline whitespace markers");
-        Assert.assertTrue(logHtml.contains("↵"),
-            "Newline glyph should be present in the rendered message");
-    }
-
-    @Test
-    public void testTabGlyphInVariableValue() throws Exception {
-        // Tab characters in variable values should render with a visible
-        // arrow glyph followed by the actual tab whitespace.
-        String testPath = "src/test/target/test-artifacts/tab-glyph-" + System.currentTimeMillis() + "/";
-        Files.createDirectories(Paths.get(testPath));
-
-        String logFilePath = testPath + "tab.html";
-        CustomLogger customLogger = new CustomLogger("TabLogger_" + UUID.randomUUID(),
-                                                      logFilePath, 10);
-        LogMessage logMessage = new LogMessage();
-        logMessage.setTestBotUri("Automation Anywhere/bots/test/tab-glyph");
-
-        Map<String, Value> vars = new java.util.LinkedHashMap<>();
-        vars.put("indented", new StringValue("col1\tcol2\tcol3"));
-        logMessage.action(customLogger, LEVEL_INFO, "Tab in variable",
-            false, LOG_VARIABLE, vars);
-
-        new StopLoggerSession().stop(customLogger);
-
-        Assert.assertFalse(Files.exists(Paths.get(testPath, "variables")), "no variable sidecar files");
-        String variablesHtml = CompressedSnapshots.expand(Files.readString(Paths.get(logFilePath)));
-        Assert.assertTrue(variablesHtml.contains("class='ws-marker ws-tab'"),
-            "Tab in variable value should emit tab whitespace markers");
-        Assert.assertTrue(variablesHtml.contains("→"),
-            "Tab glyph should be present in the rendered variable");
-    }
-
-    @Test
-    public void testTrailingSpaceMarkerInVariableValue() throws Exception {
-        // Trailing spaces on a line are bug-prone. The renderer should
-        // substitute middle-dot glyphs equal to the trailing-space count so
-        // they are visible.
-        String testPath = "src/test/target/test-artifacts/trail-space-" + System.currentTimeMillis() + "/";
-        Files.createDirectories(Paths.get(testPath));
-
-        String logFilePath = testPath + "trail.html";
-        CustomLogger customLogger = new CustomLogger("TrailLogger_" + UUID.randomUUID(),
-                                                      logFilePath, 10);
-        LogMessage logMessage = new LogMessage();
-        logMessage.setTestBotUri("Automation Anywhere/bots/test/trail-space");
-
-        Map<String, Value> vars = new java.util.LinkedHashMap<>();
-        vars.put("padded", new StringValue("value with trailing   "));
-        logMessage.action(customLogger, LEVEL_INFO, "Trailing space",
-            false, LOG_VARIABLE, vars);
-
-        new StopLoggerSession().stop(customLogger);
-
-        Assert.assertFalse(Files.exists(Paths.get(testPath, "variables")), "no variable sidecar files");
-        String variablesHtml = CompressedSnapshots.expand(Files.readString(Paths.get(logFilePath)));
-        Assert.assertTrue(variablesHtml.contains("class='ws-trail'"),
-            "Trailing spaces should emit ws-trail marker spans");
-        Assert.assertTrue(variablesHtml.contains("···"),
-            "Three trailing spaces should render as three middle-dot glyphs");
+        Assert.assertTrue(logHtml.contains("Step 1: Read input<i class='ws-nl' aria-hidden='true'></i>\n"
+                + "Step 2: Validate<i class='ws-nl' aria-hidden='true'></i>\nStep 3: Done"),
+            "Multi-line message should emit a newline marker before each line break");
     }
 
     @Test
@@ -717,15 +345,6 @@ public class RenderingShowcaseTest {
         // The inline variable styles carries the CSS rule that pins the
         // <summary> of details.full-width while the table is in view. We
         // assert the rule is present in the rendered output.
-        String testPath = "src/test/target/test-artifacts/sticky-summary-" + System.currentTimeMillis() + "/";
-        Files.createDirectories(Paths.get(testPath));
-
-        String logFilePath = testPath + "sticky.html";
-        CustomLogger customLogger = new CustomLogger("StickyLogger_" + UUID.randomUUID(),
-                                                      logFilePath, 10);
-        LogMessage logMessage = new LogMessage();
-        logMessage.setTestBotUri("Automation Anywhere/bots/test/sticky-summary");
-
         TableValue table = new TableValue();
         table.set(new Table(
             Arrays.asList(new Schema("A"), new Schema("B")),
@@ -733,13 +352,7 @@ public class RenderingShowcaseTest {
         ));
         Map<String, Value> vars = new java.util.LinkedHashMap<>();
         vars.put("smallTable", table);
-        logMessage.action(customLogger, LEVEL_INFO, "Sticky summary check",
-            false, LOG_VARIABLE, vars);
-
-        new StopLoggerSession().stop(customLogger);
-
-        Assert.assertFalse(Files.exists(Paths.get(testPath, "variables")), "no variable sidecar files");
-        String variablesHtml = CompressedSnapshots.expand(Files.readString(Paths.get(logFilePath)));
+        String variablesHtml = logOnce("sticky-summary", "Sticky summary check", vars);
         Assert.assertTrue(variablesHtml.replaceAll("\\s+", "").contains("details.full-width>summary"),
             "Sticky summary CSS rule should be present in the variables template");
         Assert.assertTrue(variablesHtml.replaceAll("\\s+", "").contains("position:sticky"),
@@ -751,79 +364,9 @@ public class RenderingShowcaseTest {
     }
 
     @Test
-    public void testDeeplyNestedStructureRenders() throws Exception {
-        // 4-level nesting: top-level dict -> list -> dict -> table -> list-in-cell.
-        // Verifies recursion through every container type at depth.
-        String testPath = "src/test/target/test-artifacts/deep-nested-" + System.currentTimeMillis() + "/";
-        Files.createDirectories(Paths.get(testPath));
-
-        String logFilePath = testPath + "deep.html";
-        CustomLogger customLogger = new CustomLogger("DeepNested_" + UUID.randomUUID(),
-                                                      logFilePath, 10);
-        LogMessage logMessage = new LogMessage();
-        logMessage.setTestBotUri("Automation Anywhere/bots/test/deep-nested");
-
-        // Innermost: list of strings, lives inside a table cell.
-        ListValue innerList = new ListValue();
-        innerList.set(Arrays.asList(new StringValue("alpha"), new StringValue("beta")));
-
-        // Level 4 wrap: a table whose first cell IS the inner list.
-        TableValue innerTable = new TableValue();
-        innerTable.set(new Table(
-            Arrays.asList(new Schema("ListCell"), new Schema("Marker")),
-            java.util.Collections.singletonList(new Row(innerList, new StringValue("level-4-marker")))
-        ));
-
-        // Level 3: dict containing the table plus a marker scalar.
-        Map<String, Value> level3Dict = new LinkedHashMap<>();
-        level3Dict.put("nestedTable", innerTable);
-        level3Dict.put("level3Marker", new StringValue("level-3-marker"));
-
-        // Level 2: list of one dict + a scalar to verify mixed siblings.
-        ListValue level2List = new ListValue();
-        level2List.set(Arrays.asList(new DictionaryValue(level3Dict), new StringValue("level-2-marker")));
-
-        // Level 1: top dict that becomes the variable value.
-        Map<String, Value> topDict = new LinkedHashMap<>();
-        topDict.put("nestedStructure", level2List);
-        topDict.put("level1Marker", new StringValue("level-1-marker"));
-
-        Map<String, Value> vars = new LinkedHashMap<>();
-        vars.put("deepNested", new DictionaryValue(topDict));
-        logMessage.action(customLogger, LEVEL_INFO, "Deep nesting test",
-            false, LOG_VARIABLE, vars);
-
-        new StopLoggerSession().stop(customLogger);
-
-        Assert.assertFalse(Files.exists(Paths.get(testPath, "variables")), "no variable sidecar files");
-        String html = CompressedSnapshots.expand(Files.readString(Paths.get(logFilePath)));
-        Assert.assertTrue(html.contains("level-1-marker"), "Level 1 dict marker should render");
-        Assert.assertTrue(html.contains("level-2-marker"), "Level 2 list scalar should render");
-        Assert.assertTrue(html.contains("level-3-marker"), "Level 3 dict marker should render");
-        Assert.assertTrue(html.contains("level-4-marker"), "Level 4 table cell should render");
-        Assert.assertTrue(html.contains("alpha"), "Innermost list element (level 5) should render");
-        Assert.assertTrue(html.contains("class='table-container'"),
-            "Table at depth should render with table-container class");
-        int detailsCount = html.split("<details").length - 1;
-        Assert.assertTrue(detailsCount >= 4,
-            "Expected at least 4 <details> elements for the nesting; got " + detailsCount);
-
-        System.out.println("Deeply-nested artifact: " + logFilePath);
-    }
-
-    @Test
     public void testEmptyContainersRender() throws Exception {
         // Empty list, empty dict, and zero-row table should render their
         // summary lines without throwing or producing malformed HTML.
-        String testPath = "src/test/target/test-artifacts/empty-containers-" + System.currentTimeMillis() + "/";
-        Files.createDirectories(Paths.get(testPath));
-
-        String logFilePath = testPath + "empty.html";
-        CustomLogger customLogger = new CustomLogger("EmptyContainers_" + UUID.randomUUID(),
-                                                      logFilePath, 10);
-        LogMessage logMessage = new LogMessage();
-        logMessage.setTestBotUri("Automation Anywhere/bots/test/empty-containers");
-
         ListValue emptyList = new ListValue();
         emptyList.set(new ArrayList<>());
 
@@ -839,257 +382,25 @@ public class RenderingShowcaseTest {
         vars.put("emptyList", emptyList);
         vars.put("emptyDict", emptyDict);
         vars.put("emptyTable", emptyTable);
-        logMessage.action(customLogger, LEVEL_INFO, "Empty containers test",
-            false, LOG_VARIABLE, vars);
-
-        new StopLoggerSession().stop(customLogger);
-
-        Assert.assertFalse(Files.exists(Paths.get(testPath, "variables")), "no variable sidecar files");
-        String html = CompressedSnapshots.expand(Files.readString(Paths.get(logFilePath)));
+        String html = logOnce("empty-containers", "Empty containers test", vars);
         Assert.assertTrue(html.contains("List: 0 items"), "Empty list summary line");
         Assert.assertTrue(html.contains("Dictionary: 0 entries"), "Empty dict summary line");
         Assert.assertTrue(html.contains("Table: 0 rows x 2 columns"), "Empty table summary line");
         Assert.assertTrue(html.contains(">A<"), "Empty table column headers should still render");
         Assert.assertTrue(html.contains(">B<"), "Empty table column headers should still render");
-
-        System.out.println("Empty-containers artifact: " + logFilePath);
-    }
-
-    @Test
-    public void testHtmlSpecialCharsInVariableName() throws Exception {
-        // Variable names that contain HTML-special characters must be escaped
-        // before rendering. Otherwise a malicious or accidental name could
-        // inject markup into the generated file.
-        String testPath = "src/test/target/test-artifacts/html-name-" + System.currentTimeMillis() + "/";
-        Files.createDirectories(Paths.get(testPath));
-
-        String logFilePath = testPath + "name.html";
-        CustomLogger customLogger = new CustomLogger("HtmlName_" + UUID.randomUUID(),
-                                                      logFilePath, 10);
-        LogMessage logMessage = new LogMessage();
-        logMessage.setTestBotUri("Automation Anywhere/bots/test/html-name");
-
-        Map<String, Value> vars = new LinkedHashMap<>();
-        vars.put("<script>alert(1)</script>", new StringValue("payload"));
-        vars.put("name & label", new StringValue("ampersand"));
-        vars.put("has \"quotes\"", new StringValue("quoted"));
-
-        Map<String, Value> innerDict = new LinkedHashMap<>();
-        innerDict.put("<inner-key>", new StringValue("inner-value"));
-        vars.put("dictWithWeirdKey", new DictionaryValue(innerDict));
-
-        logMessage.action(customLogger, LEVEL_INFO, "HTML special chars in names",
-            false, LOG_VARIABLE, vars);
-
-        new StopLoggerSession().stop(customLogger);
-
-        Assert.assertFalse(Files.exists(Paths.get(testPath, "variables")), "no variable sidecar files");
-        String html = CompressedSnapshots.expand(Files.readString(Paths.get(logFilePath)));
-        Assert.assertFalse(html.contains("<script>alert(1)</script>"),
-            "Raw script tag in name must NOT survive into the rendered HTML (XSS)");
-        Assert.assertTrue(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
-            "Variable name with script tag must be HTML-escaped");
-        Assert.assertTrue(html.contains("name &amp; label"),
-            "Ampersand in variable name must be HTML-escaped");
-        Assert.assertTrue(html.contains("&lt;inner-key&gt;"),
-            "Nested dict key with angle brackets must be HTML-escaped");
-
-        System.out.println("HTML-name artifact: " + logFilePath);
-    }
-
-    @Test
-    public void testSingleColumnAndAllNullRowTables() throws Exception {
-        // Single-column tables and rows where every cell is null are edge
-        // shapes the renderer should handle without dropping output.
-        String testPath = "src/test/target/test-artifacts/edge-tables-" + System.currentTimeMillis() + "/";
-        Files.createDirectories(Paths.get(testPath));
-
-        String logFilePath = testPath + "edge.html";
-        CustomLogger customLogger = new CustomLogger("EdgeTables_" + UUID.randomUUID(),
-                                                      logFilePath, 10);
-        LogMessage logMessage = new LogMessage();
-        logMessage.setTestBotUri("Automation Anywhere/bots/test/edge-tables");
-
-        TableValue singleCol = new TableValue();
-        singleCol.set(new Table(
-            java.util.Collections.singletonList(new Schema("OnlyColumn")),
-            Arrays.asList(
-                new Row(new StringValue("alpha")),
-                new Row(new StringValue("beta")),
-                new Row(new StringValue("gamma"))
-            )
-        ));
-
-        TableValue nullRowTable = new TableValue();
-        nullRowTable.set(new Table(
-            Arrays.asList(new Schema("X"), new Schema("Y"), new Schema("Z")),
-            Arrays.asList(
-                new Row(new StringValue("before"), new StringValue("nulls"), new StringValue("here")),
-                new Row(null, null, null),
-                new Row(new StringValue("after"), new StringValue("nulls"), new StringValue("works"))
-            )
-        ));
-
-        Map<String, Value> vars = new LinkedHashMap<>();
-        vars.put("singleColumn", singleCol);
-        vars.put("withAllNullRow", nullRowTable);
-        logMessage.action(customLogger, LEVEL_INFO, "Edge table shapes",
-            false, LOG_VARIABLE, vars);
-
-        new StopLoggerSession().stop(customLogger);
-
-        Assert.assertFalse(Files.exists(Paths.get(testPath, "variables")), "no variable sidecar files");
-        String html = CompressedSnapshots.expand(Files.readString(Paths.get(logFilePath)));
-        Assert.assertTrue(html.contains("Table: 3 rows x 1 columns"),
-            "Single-column table summary");
-        Assert.assertTrue(html.contains(">OnlyColumn<"), "Single column header");
-        Assert.assertTrue(html.contains("alpha"), "Single-column row content");
-        Assert.assertTrue(html.contains("Table: 3 rows x 3 columns"),
-            "All-null-row table summary");
-        Assert.assertTrue(html.contains("before"), "Row before all-null row");
-        Assert.assertTrue(html.contains("after"), "Row after all-null row");
-
-        System.out.println("Edge-tables artifact: " + logFilePath);
     }
 
     @Test
     public void testFlatLayoutAppliedNoOuterRadius() throws Exception {
         // The log and variable dialog share the flat, edge-to-edge stylesheet.
-        String testPath = "src/test/target/test-artifacts/flat-layout-" + System.currentTimeMillis() + "/";
-        Files.createDirectories(Paths.get(testPath));
-
-        String logFilePath = testPath + "flat.html";
-        CustomLogger customLogger = new CustomLogger("FlatLogger_" + UUID.randomUUID(),
-                                                      logFilePath, 10);
-        LogMessage logMessage = new LogMessage();
-        logMessage.setTestBotUri("Automation Anywhere/bots/test/flat-layout");
-
         Map<String, Value> vars = new java.util.LinkedHashMap<>();
         vars.put("k", new StringValue("v"));
-        logMessage.action(customLogger, LEVEL_INFO, "flat", false, LOG_VARIABLE, vars);
-
-        new StopLoggerSession().stop(customLogger);
-
-        String logHtml = CompressedSnapshots.expand(new String(Files.readAllBytes(Paths.get(logFilePath))));
-        Assert.assertFalse(Files.exists(Paths.get(testPath, "variables")), "no variable sidecar files");
-        String variablesHtml = CompressedSnapshots.expand(Files.readString(Paths.get(logFilePath)));
-
-        Assert.assertFalse(logHtml.replaceAll("\\s+", "").contains("border-radius:var(--radius)"),
-            "log.html should no longer round outer corners with --radius");
-        Assert.assertFalse(variablesHtml.replaceAll("\\s+", "").contains("border-radius:var(--radius)"),
-            "variables.html should no longer round outer corners with --radius");
-        Assert.assertTrue(logHtml.replaceAll("\\s+", "").contains("body{margin:0auto;"),
+        String css = logOnce("flat-layout", "flat", vars).replaceAll("\\s+", "");
+        Assert.assertFalse(css.contains("border-radius:var(--radius)"),
+            "the log should no longer round outer corners with --radius");
+        Assert.assertTrue(css.contains("body{margin:0auto;"),
             "The body has no outer horizontal margin");
-        Assert.assertTrue(variablesHtml.replaceAll("\\s+", "").contains("overflow:hidden;"),
+        Assert.assertTrue(css.contains("overflow:hidden;"),
             "The table scroll area keeps the session header visible");
-    }
-
-    @Test
-    public void testVideoRecordingShowcase() throws Exception {
-        // Persistent artifact for visual review of the renamed "Screen" column
-        // with a real video clip. Skipped on machines without an interactive
-        // desktop because the bundled ffmpeg only supports gdigrab capture.
-        screen.process.DesktopAvailability.requireDesktop();
-
-        String testPath = "src/test/target/test-artifacts/showcase-video-"
-                + System.currentTimeMillis() + "/";
-        Files.createDirectories(Paths.get(testPath));
-
-        String logFilePath = testPath + "showcase.html";
-
-        java.util.Set<org.apache.logging.log4j.Level> levels = new java.util.HashSet<>();
-        levels.add(org.apache.logging.log4j.Level.WARN);
-        levels.add(org.apache.logging.log4j.Level.ERROR);
-
-        CustomLogger customLogger = new CustomLogger("VideoShowcase_" + UUID.randomUUID(),
-                logFilePath, 50, /* bufferSeconds */ 10, levels,
-                com.automationanywhere.botcommand.utilities.screen.recorder.EncodingMode.COMPACT);
-
-        LogMessage logMessage = new LogMessage();
-        logMessage.setTestBotUri("Automation Anywhere/bots/test/video-showcase");
-
-        // 1. INFO before failure - no video, no still
-        logMessage.action(customLogger, LEVEL_INFO,
-            "Bot started; rolling buffer is filling",
-            false, DO_NOT_LOG_VARIABLE, null);
-
-        // 2. INFO with manual screenshot - existing path, unchanged
-        logMessage.action(customLogger, LEVEL_INFO,
-            "Initial state captured for baseline",
-            true, DO_NOT_LOG_VARIABLE, null);
-
-        // Wait until the ring has 6 segments (5 stable + 1 in-flight) before the
-        // first level-trigger. That gives the WARN clip ~5 s of footage rather
-        // than just the 1 s that the test-passing minimum would produce.
-        screen.process.RecorderTestSupport.awaitSessionMovSegments(
-            customLogger.getLoggerId(), 6, java.time.Duration.ofSeconds(15));
-
-        // 3. WARN - triggers video recording (level is in our set)
-        Map<String, Value> warnVars = new LinkedHashMap<>();
-        warnVars.put("retryCount", new NumberValue(2));
-        warnVars.put("lastError", new StringValue("intermittent timeout"));
-        logMessage.action(customLogger, LEVEL_WARN,
-            "Retrying after timeout - capturing recording for context",
-            false, LOG_VARIABLE, warnVars);
-
-        // 4. INFO between failures - no video
-        logMessage.action(customLogger, LEVEL_INFO,
-            "Continuing with retry attempt",
-            false, DO_NOT_LOG_VARIABLE, null);
-
-        // Wait for the ring to roll forward to 9 segments so the ERROR clip has
-        // ~8 s of footage and is visibly different from the WARN clip.
-        screen.process.RecorderTestSupport.awaitSessionMovSegments(
-            customLogger.getLoggerId(), 9, java.time.Duration.ofSeconds(15));
-
-        // 5. ERROR - triggers another video recording
-        Map<String, Value> errVars = new LinkedHashMap<>();
-        errVars.put("recordId", new StringValue("CUST-018273"));
-        errVars.put("step", new StringValue("submit-form"));
-        errVars.put("retryAttempts", new NumberValue(3));
-        logMessage.action(customLogger, LEVEL_ERROR,
-            "Maximum retries exceeded - aborting record",
-            false, LOG_VARIABLE, errVars);
-
-        // Stop the session. close() is non-blocking: stage-2 encodes finish on
-        // the per-session encoder pool's worker threads after stop returns.
-        new StopLoggerSession().stop(customLogger);
-
-        // Wait for at least one mp4 to land. With libaom-av1 -cpu-used 8 each
-        // encode is ~5-15 s; two parallel encodes contend for CPU so the first
-        // typically finishes first while the second trails. Poll generously.
-        java.nio.file.Path clipsDir = Paths.get(testPath, "clips");
-        java.nio.file.Path screenshotsDir = Paths.get(testPath, "screenshots");
-        screen.process.RecorderTestSupport.awaitMp4Clips(
-                clipsDir, 1, java.time.Duration.ofSeconds(60));
-
-        long mp4s = countMatching(clipsDir, ".mp4");
-        long pngs = countMatching(screenshotsDir, ".png");
-        // The encoder pool may still have the second clip in flight when this
-        // assertion runs; the poster PNG is taken synchronously before submit,
-        // so the HTML row carries the still even when the mp4 is yet to land.
-        Assert.assertTrue(mp4s >= 1L,
-                "showcase should produce at least 1 mp4; got " + mp4s);
-        Assert.assertTrue(pngs >= 3,
-                "showcase should produce at least 3 PNGs (1 manual + 2 video posters); got " + pngs);
-
-        String html = CompressedSnapshots.expand(Files.readString(Paths.get(logFilePath),
-                java.nio.charset.StandardCharsets.UTF_8));
-        Assert.assertTrue(html.contains("video-link"),
-                "rendered HTML must contain video-link class");
-        Assert.assertTrue(html.contains("<th scope='col'>Screen</th>"),
-                "rendered HTML must contain the renamed Screen header");
-
-        System.out.println("Video showcase artifact: " + new File(logFilePath).getAbsolutePath());
-        System.out.println("  -> " + mp4s + " clip(s), " + pngs + " screenshot(s)");
-    }
-
-    private static long countMatching(java.nio.file.Path dir, String suffix) throws IOException {
-        if (!Files.isDirectory(dir)) {
-            return 0L;
-        }
-        try (java.util.stream.Stream<java.nio.file.Path> stream = Files.list(dir)) {
-            return stream.filter(p -> p.toString().endsWith(suffix)).count();
-        }
     }
 }

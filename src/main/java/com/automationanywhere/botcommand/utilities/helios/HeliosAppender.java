@@ -9,9 +9,10 @@ import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.core.appender.AbstractAppender;
 import org.apache.logging.log4j.core.config.Property;
 
-import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Snapshots log values to disk on the caller thread; HTTP never runs on that thread. */
@@ -19,37 +20,38 @@ public final class HeliosAppender extends AbstractAppender {
     private final HeliosJsonLayout layout;
     private final Logger logger;
     private static final String DIAGNOSTIC = "HELIOS_LOCAL_DIAGNOSTIC";
-    private final AtomicBoolean warned = new AtomicBoolean();
+    private final AtomicBoolean delayedWarned = new AtomicBoolean();
+    private final Set<String> terminalWarnings = ConcurrentHashMap.newKeySet();
     private HeliosSink sink;
     private int expectedEntries;
     private boolean finished;
     private boolean captureFailed;
 
-    public HeliosAppender(String name, HeliosConfig config, Logger logger) {
-        this(name, config, logger, java.util.UUID.randomUUID().toString());
-    }
-
     public HeliosAppender(String name, HeliosConfig config, Logger logger, String loggerSessionId) {
         super(name, MarkerFilter.createFilter(DIAGNOSTIC, Filter.Result.DENY, Filter.Result.NEUTRAL),
                 null, true, Property.EMPTY_ARRAY);
-        layout = config == null ? new HeliosJsonLayout() : new HeliosJsonLayout(config.machine, config.user);
+        layout = new HeliosJsonLayout();
         this.logger = logger;
         try {
-            sink = new HeliosSink(config, Paths.get(System.getProperty("helios.outbox.directory",
-                    Paths.get(System.getProperty("user.home"), ".helios", "outbox").toString())), this::warn, loggerSessionId);
+            sink = new HeliosSink(config, HeliosSink.outboxRoot(), this::warn, loggerSessionId);
         } catch (Exception error) {
             captureFailed = true;
-            warn("Cloud capture could not start. HTML logging continues; cloud logs are incomplete.");
+            warn(HeliosSink.INVALID_URL.equals(error.getMessage()) ? HeliosSink.INVALID_URL
+                    : "Cloud capture could not start. HTML logging continues; cloud logs are incomplete.");
         }
     }
 
     @Override public synchronized void append(LogEvent event) {
-        if (finished || event.getMarker() != null && event.getMarker().isInstanceOf(DIAGNOSTIC)) return;
+        if (finished) return;
+        Object[] parameters = event.getMessage().getParameters();
+        // Other packages stream only WARN and ERROR; their INFO entries stay in the HTML log and take no ordinal.
+        if (event.getLevel() == org.apache.logging.log4j.Level.INFO && parameters != null && parameters.length > 0
+                && parameters[0] instanceof Map
+                && Boolean.TRUE.equals(((Map<?, ?>) parameters[0]).get(CustomHTMLLayout.Columns.EXTERNAL))) return;
         int ordinal = expectedEntries++;
         if (sink == null) return;
         try {
             org.json.JSONObject row = layout.toJson(event, ordinal);
-            Object[] parameters = event.getMessage().getParameters();
             if (parameters != null && parameters.length > 0 && parameters[0] instanceof Map) {
                 Object request = ((Map<?, ?>) parameters[0]).get(ErrorMedia.COLUMN);
                 if (request instanceof ErrorMedia) {
@@ -68,9 +70,8 @@ public final class HeliosAppender extends AbstractAppender {
         } catch (Exception error) {
             if (!captureFailed) {
                 captureFailed = true;
-                warned.set(true);
                 // This warning must remain visible even if a prior network warning was already emitted.
-                writeWarning("Cloud logs are incomplete: a log entry could not be saved to the disk buffer. "
+                warn("Cloud logs are incomplete: a log entry could not be saved to the disk buffer. "
                         + "HTML logging continues and buffered entries are preserved.");
             }
         }
@@ -100,11 +101,9 @@ public final class HeliosAppender extends AbstractAppender {
     }
 
     private void warn(String message) {
-        if (warned.compareAndSet(false, true)) writeWarning(message);
-    }
-
-    private void writeWarning(String message) {
-        writeLocalWarning(logger, message);
+        boolean first = HeliosSink.DELAY_WARNING.equals(message)
+                ? delayedWarned.compareAndSet(false, true) : terminalWarnings.add(message);
+        if (first) writeLocalWarning(logger, message);
     }
 
     public static void writeLocalWarning(Logger logger, String message) {

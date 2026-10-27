@@ -103,7 +103,7 @@ public class VideoRecordingIntegrationTest {
 
         Assert.assertTrue(Files.isDirectory(clipsDir),
                 "clips/ directory should exist next to log.html");
-        long mp4Count = countByExt(clipsDir, ".mp4");
+        long mp4Count = RecorderTestSupport.countByExt(clipsDir, ".mp4");
         Assert.assertEquals(mp4Count, 1L,
                 "exactly one .mp4 should be in clips/; found " + mp4Count);
 
@@ -111,7 +111,7 @@ public class VideoRecordingIntegrationTest {
         Assert.assertTrue(mp4Size > 1000,
                 "the produced mp4 should be at least ~1 KB; got " + mp4Size + " bytes");
 
-        long posterCount = countByExt(screenshotsDir, ".png");
+        long posterCount = RecorderTestSupport.countByExt(screenshotsDir, ".png");
         Assert.assertTrue(posterCount >= 1,
                 "at least one error_*.png poster should exist; found " + posterCount);
 
@@ -121,7 +121,7 @@ public class VideoRecordingIntegrationTest {
                 "rendered log.html must contain 'video-link' class for the error row");
         Assert.assertTrue(html.contains("clips/") && html.contains(".mp4"),
                 "rendered log.html must reference the mp4 under clips/");
-        Assert.assertTrue(html.contains("<th>Screen</th>"),
+        Assert.assertTrue(html.contains("<th scope='col'>Screen</th>"),
                 "the Screen column header must be present");
 
         // The session-private workspace under %LOCALAPPDATA% is cleaned by
@@ -159,7 +159,7 @@ public class VideoRecordingIntegrationTest {
         Path clipsDir = baseDir.resolve("clips");
         Assert.assertTrue(Files.isDirectory(clipsDir),
                 "clips/ directory should exist next to log.html");
-        long mp4Count = countByExt(clipsDir, ".mp4");
+        long mp4Count = RecorderTestSupport.countByExt(clipsDir, ".mp4");
         Assert.assertEquals(mp4Count, 1L,
                 "FAST mode must produce exactly one mp4; found " + mp4Count);
         long mp4Size = sumSizeByExt(clipsDir, ".mp4");
@@ -186,17 +186,9 @@ public class VideoRecordingIntegrationTest {
         stopSession.stop(logger);
 
         Path clipsDir = baseDir.resolve("clips");
-        long mp4Count = Files.isDirectory(clipsDir) ? countByExt(clipsDir, ".mp4") : 0;
+        long mp4Count = Files.isDirectory(clipsDir) ? RecorderTestSupport.countByExt(clipsDir, ".mp4") : 0;
         Assert.assertEquals(mp4Count, 0L,
                 "INFO-only session must not produce any .mp4 (video off for INFO)");
-    }
-
-    private static long countByExt(Path dir, String ext) throws IOException {
-        if (!Files.isDirectory(dir)) return 0;
-        try (Stream<Path> s = Files.list(dir)) {
-            return s.filter(p -> p.toString().toLowerCase().endsWith(ext.toLowerCase()))
-                    .count();
-        }
     }
 
     private static long sumSizeByExt(Path dir, String ext) throws IOException {

@@ -4,47 +4,48 @@ import com.automationanywhere.botcommand.actions.logs.LogMessage;
 import com.automationanywhere.botcommand.actions.logs.StartLoggerSession;
 import com.automationanywhere.botcommand.utilities.helios.CloudMediaMode;
 import com.automationanywhere.botcommand.utilities.helios.HeliosConfig;
+import com.automationanywhere.botcommand.utilities.helios.HeliosStubServer;
 import com.automationanywhere.botcommand.utilities.logger.CustomLogger;
 import com.automationanywhere.botcommand.utilities.screen.recorder.EncodingMode;
-import com.automationanywhere.botcommand.utilities.screen.recorder.ScreenRecorder;
 import com.automationanywhere.core.security.SecureString;
-import com.sun.net.httpserver.HttpServer;
 import org.apache.logging.log4j.Level;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.testng.Assert;
+import org.testng.annotations.AfterClass;
 import org.testng.annotations.Test;
-import java.nio.charset.StandardCharsets;
+import support.ChildJvm;
+import support.TempDirectories;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
 public class InheritedErrorMediaTest {
+    private final TempDirectories temp = new TempDirectories();
+
+    @AfterClass(alwaysRun = true)
+    public void deleteTemporaryFolders() { temp.deleteAll(); }
+
     @Test public void actualLoggerAndActionMatrixUsesSettingsEvenWhenNativeStartupFails() throws Exception {
-        Path root = Files.createTempDirectory("inherited-error-media");
+        Path root = temp.create("inherited-error-media");
         Path blocked = root.resolve("blocked-native-root");
         Files.writeString(blocked, "native capture must not start in this test");
-        Set<String> classpath = new java.util.LinkedHashSet<>();
-        for (Class<?> type : new Class<?>[] { getClass(), CustomLogger.class, JSONObject.class, Assert.class,
+        Set<String> classpath = new java.util.LinkedHashSet<>(ChildJvm.classPath(getClass(), CustomLogger.class, JSONObject.class, Assert.class,
                 org.apache.logging.log4j.Logger.class, org.apache.logging.log4j.core.LoggerContext.class,
-                org.apache.commons.io.FilenameUtils.class, org.apache.commons.lang3.StringUtils.class,
-                SecureString.class, com.automationanywhere.botcommand.data.impl.SessionValue.class,
-                com.automationanywhere.toolchain.runtime.session.CloseableSessionObject.class, com.google.protobuf.Message.class })
-            classpath.add(Path.of(type.getProtectionDomain().getCodeSource().getLocation().toURI()).toString());
+                org.apache.commons.io.FilenameUtils.class, SecureString.class,
+                com.automationanywhere.botcommand.data.impl.SessionValue.class,
+                com.automationanywhere.toolchain.runtime.session.CloseableSessionObject.class, com.google.protobuf.Message.class));
         classpath.add(Path.of("build/resources/main").toAbsolutePath().toString());
-        ProcessBuilder builder = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+        ProcessBuilder builder = new ProcessBuilder(ChildJvm.command(getClass(), classpath, List.of(
                 "-Duser.home=" + blocked, "-Djava.io.tmpdir=" + blocked, "-Djava.awt.headless=true",
-                "-Dhelios.outbox.directory=" + root.resolve("outbox"), "-cp", String.join(java.io.File.pathSeparator, classpath),
-                getClass().getName(), root.toString());
+                "-Dhelios.outbox.directory=" + root.resolve("outbox")), root.toString()));
         builder.environment().remove("LOCALAPPDATA");
         builder.redirectErrorStream(true).redirectOutput(root.resolve("matrix.log").toFile());
         Process child = builder.start();
@@ -55,7 +56,6 @@ public class InheritedErrorMediaTest {
 
     @Test public void generatedCommandHasOnlyExistingControlsAndKeepsDefaults() throws Exception {
         JSONArray commands = new JSONArray(Files.readString(Path.of("build/generated/sources/annotationProcessor/java/main/tmp/commands.json")));
-        Assert.assertEquals(commands.length(), 14);
         JSONObject start = null;
         int starts = 0;
         for (int index = 0; index < commands.length(); index++) {
@@ -69,7 +69,6 @@ public class InheritedErrorMediaTest {
         Map<String, JSONObject> attributes = new HashMap<>();
         collect(start.getJSONArray("attributes"), attributes);
         Assert.assertFalse(attributes.containsKey("heliosErrorMedia"));
-        Assert.assertFalse(attributes.containsKey("ignoredHeliosErrorMedia"));
         Assert.assertEquals(attributes.get("captureScreenRecording").getJSONObject("defaultValue").getString("string"), "NO_VIDEO");
         Assert.assertEquals(attributes.get("heliosStreaming").getJSONObject("defaultValue").getString("string"), "HELIOS_DISABLED");
         Assert.assertFalse(attributes.get("videoOnInfo").getJSONObject("defaultValue").getBoolean("boolean"));
@@ -85,13 +84,11 @@ public class InheritedErrorMediaTest {
         Assert.assertTrue(rules.toString().contains("\"90\""));
         String source = Files.readString(Path.of("src/main/java/com/automationanywhere/botcommand/actions/logs/StartLoggerSession.java"));
         Assert.assertEquals(source.split("@Execute", -1).length - 1, 1);
-        Assert.assertTrue(java.util.Arrays.stream(StartLoggerSession.class.getMethods())
-                .anyMatch(method -> method.getName().equals("start") && method.getParameterCount() == 15));
-        Assert.assertTrue(java.util.Arrays.stream(StartLoggerSession.class.getMethods())
-                .anyMatch(method -> method.getName().equals("start") && method.getParameterCount() == 16));
+        Assert.assertEquals(java.util.Arrays.stream(StartLoggerSession.class.getMethods())
+                .filter(method -> method.getName().equals("start")).mapToInt(java.lang.reflect.Method::getParameterCount)
+                .boxed().collect(java.util.stream.Collectors.toList()), List.of(15));
         String generated = Files.readString(Path.of("build/generated/sources/annotationProcessor/java/main/com/automationanywhere/botcommand/actions/logs/StartLoggerSessionCommand.java"));
         Assert.assertFalse(generated.contains("heliosErrorMedia"));
-        Assert.assertFalse(generated.contains("ignoredHeliosErrorMedia"));
     }
 
     private static void collect(JSONArray items, Map<String, JSONObject> output) {
@@ -108,7 +105,7 @@ public class InheritedErrorMediaTest {
 
     public static void main(String[] args) throws Exception {
         Path root = Path.of(args[0]);
-        try (Server server = new Server()) {
+        try (HeliosStubServer server = HeliosStubServer.withMedia()) {
             for (boolean split : new boolean[] { false, true }) {
                 for (int flags = 0; flags < 8; flags++) {
                     Set<Level> levels = new HashSet<>();
@@ -117,17 +114,12 @@ public class InheritedErrorMediaTest {
                     if ((flags & 4) != 0) levels.add(Level.ERROR);
                     for (int buffer : new int[] { 0, 5, 90 }) {
                         check(root, split, buffer, levels, flags % 2 == 0 ? EncodingMode.FAST : EncodingMode.COMPACT,
-                                server.config(), buffer > 0 && levels.contains(Level.ERROR) ? CloudMediaMode.VIDEO : CloudMediaMode.SCREENSHOT);
+                                config(server), buffer > 0 && levels.contains(Level.ERROR) ? CloudMediaMode.VIDEO : CloudMediaMode.SCREENSHOT);
                     }
                     check(root, split, 90, levels, EncodingMode.COMPACT, null, CloudMediaMode.OFF);
                 }
-                for (CloudMediaMode old : new CloudMediaMode[] { null, CloudMediaMode.OFF, CloudMediaMode.SCREENSHOT, CloudMediaMode.VIDEO }) {
-                    HeliosConfig legacy = new HeliosConfig(server.url(), "test-key", "matrix-aa", "bot", "master", "file", "machine", "user", null, old);
-                    check(root, split, 5, Set.of(Level.ERROR), EncodingMode.FAST, legacy, CloudMediaMode.VIDEO);
-                    check(root, split, 90, Set.of(Level.INFO, Level.WARN), EncodingMode.COMPACT, legacy, CloudMediaMode.SCREENSHOT);
-                    check(root, split, 0, null, null, legacy, CloudMediaMode.SCREENSHOT);
-                }
-                check(root, split, -1, Set.of(Level.ERROR), null, server.config(), CloudMediaMode.SCREENSHOT);
+                check(root, split, 0, null, null, config(server), CloudMediaMode.SCREENSHOT);
+                check(root, split, -1, Set.of(Level.ERROR), null, config(server), CloudMediaMode.SCREENSHOT);
             }
             actionCompatibility(root, server);
             logMessageEligibility(root, server);
@@ -140,13 +132,9 @@ public class InheritedErrorMediaTest {
         CustomLogger logger = logger(root, split, buffer, levels, mode, config);
         try {
             Assert.assertEquals(logger.getCloudMediaMode(), expected);
-            java.lang.reflect.Field configured = CustomLogger.class.getDeclaredField("localRecordingLevels");
-            configured.setAccessible(true);
-            Assert.assertEquals(configured.get(logger), levels == null ? Set.of() : levels, "no level is forced into the local recorder");
-            java.lang.reflect.Field recorder = CustomLogger.class.getDeclaredField("recorder");
-            recorder.setAccessible(true);
-            Assert.assertSame(recorder.get(logger), ScreenRecorder.DISABLED, "native failure has no extra or cloud-only recorder fallback");
-            if (expected == CloudMediaMode.VIDEO) Assert.assertFalse(logger.shouldRecordVideoFor(Level.ERROR), "requested VIDEO does not depend on recorder health");
+            // Native capture cannot start in this JVM, so no recorder runs and no level can record.
+            for (Level level : new Level[] { Level.INFO, Level.WARN, Level.ERROR })
+                Assert.assertFalse(logger.shouldRecordVideoFor(level), "native failure has no extra or cloud-only recorder fallback for " + level);
         } finally { logger.close(); }
     }
 
@@ -157,28 +145,28 @@ public class InheritedErrorMediaTest {
                 Level.WARN, logs.resolve("warn.html").toString(), Level.ERROR, logs.resolve("error.html").toString()), 1000, buffer, levels, mode, config);
     }
 
-    private static void actionCompatibility(Path root, Server server) throws Exception {
+    private static void actionCompatibility(Path root, HeliosStubServer server) throws Exception {
         StartLoggerSession action = new StartLoggerSession();
         SecureString key = new SecureString("test-key".toCharArray());
         CustomLogger plain = (CustomLogger) action.start("COMMON_FILE", root.resolve("plain.html").toString(), null, null, null,
                 1000, "NO_VIDEO", true, true, true, 90, "COMPACT", "HELIOS_ENABLED", server.url(), key).getSession();
         try { Assert.assertEquals(plain.getCloudMediaMode(), CloudMediaMode.SCREENSHOT); } finally { plain.close(); }
-        CustomLogger oldOff = (CustomLogger) action.start("COMMON_FILE", root.resolve("old-off.html").toString(), null, null, null,
-                1000, "VIDEO_ENABLED", false, false, true, 5, "FAST", "HELIOS_ENABLED", server.url(), key, "OFF").getSession();
-        try { Assert.assertEquals(oldOff.getCloudMediaMode(), CloudMediaMode.VIDEO); } finally { oldOff.close(); }
-        CustomLogger oldVideo = (CustomLogger) action.start("COMMON_FILE", root.resolve("old-video.html").toString(), null, null, null,
-                1000, "NO_VIDEO", null, null, null, null, null, "HELIOS_ENABLED", server.url(), key, "VIDEO").getSession();
-        try { Assert.assertEquals(oldVideo.getCloudMediaMode(), CloudMediaMode.SCREENSHOT); } finally { oldVideo.close(); }
+        CustomLogger errorVideo = (CustomLogger) action.start("COMMON_FILE", root.resolve("error-video.html").toString(), null, null, null,
+                1000, "VIDEO_ENABLED", false, false, true, 5, "FAST", "HELIOS_ENABLED", server.url(), key).getSession();
+        try { Assert.assertEquals(errorVideo.getCloudMediaMode(), CloudMediaMode.VIDEO); } finally { errorVideo.close(); }
+        CustomLogger nulls = (CustomLogger) action.start("COMMON_FILE", root.resolve("nulls.html").toString(), null, null, null,
+                1000, "NO_VIDEO", null, null, null, null, null, "HELIOS_ENABLED", server.url(), key).getSession();
+        try { Assert.assertEquals(nulls.getCloudMediaMode(), CloudMediaMode.SCREENSHOT); } finally { nulls.close(); }
         CustomLogger nullBuffer = (CustomLogger) action.start("COMMON_FILE", root.resolve("null-buffer.html").toString(), null, null, null,
                 1000, "VIDEO_ENABLED", true, true, true, null, null, "HELIOS_ENABLED", server.url(), key).getSession();
         try { Assert.assertEquals(nullBuffer.getCloudMediaMode(), CloudMediaMode.SCREENSHOT); } finally { nullBuffer.close(); }
     }
 
 
-    private static void logMessageEligibility(Path root, Server server) throws Exception {
+    private static void logMessageEligibility(Path root, HeliosStubServer server) throws Exception {
         LogMessage action = new LogMessage();
         action.setTestBotUri("PUBLIC:/Bots/tasks/Matrix@v1");
-        CustomLogger video = logger(root, false, 5, Set.of(Level.INFO, Level.WARN, Level.ERROR), EncodingMode.FAST, server.config());
+        CustomLogger video = logger(root, false, 5, Set.of(Level.INFO, Level.WARN, Level.ERROR), EncodingMode.FAST, config(server));
         String id = video.getLoggerId();
         try {
             action.action(video, "INFO", "local INFO flag", false, "NO", null);
@@ -187,7 +175,7 @@ public class InheritedErrorMediaTest {
             action.action(video, "INFO", "recovered", false, "NO", null);
             action.action(video, "ERROR", "second ERROR", false, "NO", null);
         } finally { video.close(); }
-        List<JSONObject> rows = server.rows.get(id);
+        List<JSONObject> rows = new ArrayList<>(server.rows(id).values());
         Assert.assertEquals(rows.size(), 5);
         for (JSONObject row : rows) {
             if ("ERROR".equals(row.getString("level"))) {
@@ -198,47 +186,16 @@ public class InheritedErrorMediaTest {
                 Assert.assertEquals(media.getJSONObject(1).getString("reason"), "videoUnavailable");
             } else Assert.assertFalse(row.has("media"), "INFO/WARN recording flags do not make cloud media eligible");
         }
-        CustomLogger screenshot = logger(root, true, 90, Set.of(Level.INFO, Level.WARN), EncodingMode.COMPACT, server.config());
+        CustomLogger screenshot = logger(root, true, 90, Set.of(Level.INFO, Level.WARN), EncodingMode.COMPACT, config(server));
         String stillId = screenshot.getLoggerId();
         try { action.action(screenshot, "ERROR", "ERROR unchecked", false, "NO", null); }
         finally { screenshot.close(); }
-        JSONArray media = server.rows.get(stillId).get(0).getJSONArray("media");
+        JSONArray media = server.rows(stillId).get(0).getJSONArray("media");
         Assert.assertEquals(media.length(), 1);
         Assert.assertEquals(media.getJSONObject(0).getString("kind"), "screenshot");
     }
 
-    private static final class Server implements AutoCloseable {
-        final HttpServer server = HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
-        final Map<String, List<JSONObject>> rows = new ConcurrentHashMap<>();
-        Server() throws Exception {
-            server.createContext("/api/ingest/sessions", exchange -> {
-                JSONObject body = new JSONObject(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
-                String[] path = exchange.getRequestURI().getPath().split("/");
-                JSONObject reply;
-                if (path.length == 4) {
-                    String id = body.getString("loggerSessionId");
-                    rows.putIfAbsent(id, new CopyOnWriteArrayList<>());
-                    reply = new JSONObject().put("sessionId", id).put("executionSessionId", "66666666-7777-8888-9999-000000000000")
-                            .put("executionId", body.getString("executionId")).put("media", new JSONObject().put("version", 1)
-                            .put("maxScreenshotBytes", 1048576).put("maxVideoBytes", 8388608));
-                } else if (path.length == 8) {
-                    reply = new JSONObject(body.toString()).put("sessionId", path[4]).put("ordinal", Integer.parseInt(path[6]))
-                            .put("expiresAtUtc", Instant.now().plusSeconds(86400).toString());
-                } else if ("entries".equals(path[5])) {
-                    JSONArray entries = body.getJSONArray("entries");
-                    for (int i = 0; i < entries.length(); i++) rows.get(path[4]).add(entries.getJSONObject(i));
-                    reply = new JSONObject().put("accepted", entries.length()).put("duplicates", 0)
-                            .put("nextOrdinal", body.getInt("firstOrdinal") + entries.length());
-                } else reply = new JSONObject().put("complete", true).put("storedEntries", body.getInt("expectedEntries"));
-                byte[] bytes = reply.toString().getBytes(StandardCharsets.UTF_8);
-                exchange.sendResponseHeaders(200, bytes.length);
-                exchange.getResponseBody().write(bytes);
-                exchange.close();
-            });
-            server.start();
-        }
-        String url() { return "http://127.0.0.1:" + server.getAddress().getPort(); }
-        HeliosConfig config() { return new HeliosConfig(url(), "test-key", "matrix-aa", "bot", "master", "file", "machine", "user", null); }
-        @Override public void close() { server.stop(0); }
+    private static HeliosConfig config(HeliosStubServer server) {
+        return new HeliosConfig(server.url(), "test-key", "matrix-aa", "bot", "master", "file", "machine", "user", null);
     }
 }

@@ -1,6 +1,7 @@
 package com.automationanywhere.botcommand.utilities.helios;
 
 import com.automationanywhere.botcommand.data.Value;
+import com.automationanywhere.botcommand.data.impl.CredentialObject;
 import com.automationanywhere.botcommand.data.impl.DictionaryValue;
 import com.automationanywhere.botcommand.data.impl.ListValue;
 import com.automationanywhere.botcommand.data.impl.RecordValue;
@@ -19,9 +20,14 @@ import java.util.Map;
 /**
  * Renders a bot {@link Value} as the plain text that Helios Cloud shows for a streamed variable.
  *
- * <p>Scalars render as their own text, the same string the variables HTML page shows. Containers
- * render as JSON text: a list becomes an array, a dictionary and a record become objects, and a
- * table becomes an array of row objects keyed by column name. Nested values follow the same rules.
+ * <p>A scalar renders as the plain {@code toString()} of its value. Unlike the HTML log, the text is
+ * not escaped for HTML. Containers render as JSON text: a list becomes an array, a dictionary and a
+ * record become objects, and a table becomes an array of row objects keyed by column name. Nested
+ * values follow the same rules; inside a container a number or boolean keeps its JSON type and a
+ * null becomes {@code null}.
+ *
+ * <p>A Credential renders as {@code ********} at any depth, so its secret never reaches Helios. A
+ * nested one becomes the JSON string {@code "********"}.
  *
  * <p>Rendering never throws: a value the SDK cannot walk renders as {@code <unrenderable TYPE>} so
  * one bad variable cannot cost the entry.
@@ -51,6 +57,9 @@ public final class VariableText {
     private static Object toJson(Value value) {
         if (value == null) {
             return JSONObject.NULL;
+        }
+        if (value instanceof CredentialObject) {
+            return HTMLGenerator.CREDENTIAL_MASK;
         }
         if (value instanceof ListValue) {
             JSONArray array = new JSONArray();

@@ -155,7 +155,8 @@ public class StartLoggerSession {
                     @Idx.Option(index = "4.2", pkg = @Pkg(label = "Enabled", value = HELIOS_ENABLED))})
             @Pkg(label = "Helios Cloud streaming",
                     description = "Streams every entry of this session to a Helios Cloud server "
-                            + "while the bot runs. ERROR media inherits Screen recording: selected ERROR video uploads "
+                            + "while the bot runs. Entries from other packages (for example Better Recorder) stream only at "
+                            + "WARN and ERROR. ERROR media inherits Screen recording: selected ERROR video uploads "
                             + "the clip and a screenshot; otherwise each ERROR uploads a screenshot. The HTML log is written either way.",
                     default_value = HELIOS_DISABLED, default_value_type = DataType.STRING)
             @SelectModes
@@ -219,16 +220,6 @@ public class StartLoggerSession {
         } catch (Exception e) {
             throw new BotCommandException("Error occurred while creating new session: " + e.getMessage(), e);
         }
-    }
-
-    public SessionValue start(String logLevelsAndFileOption, String logFilePath, String infoLogFilePath,
-            String warnLogFilePath, String errorLogFilePath, Number maxLogEntries, String captureScreenRecording,
-            Boolean videoOnInfo, Boolean videoOnWarn, Boolean videoOnError, Number videoBufferSeconds,
-            String encodingMode, String heliosStreaming, String heliosUrl, SecureString heliosIngestKey,
-            String ignoredHeliosErrorMedia) {
-        return start(logLevelsAndFileOption, logFilePath, infoLogFilePath, warnLogFilePath, errorLogFilePath,
-                maxLogEntries, captureScreenRecording, videoOnInfo, videoOnWarn, videoOnError, videoBufferSeconds,
-                encodingMode, heliosStreaming, heliosUrl, heliosIngestKey);
     }
 
     /**

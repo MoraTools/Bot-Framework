@@ -24,7 +24,6 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -48,7 +47,6 @@ public final class HeliosMediaOutbox {
     private volatile String currentSessionId;
     private volatile boolean jsonClosing;
     private volatile boolean stopping;
-    private volatile boolean oldServerWarned;
     private volatile boolean damagedManifestWarned;
 
     HeliosMediaOutbox(Path outboxRoot, Path partition, String loggerId, String journalName,
@@ -126,10 +124,7 @@ public final class HeliosMediaOutbox {
                 JSONObject job = readJob(path);
                 if (job == null) continue;
                 if (!journal.equals(job.optString("journal"))) continue;
-                if (job.has("sessionId") && !sessionId.equals(job.getString("sessionId"))) {
-                    job.put("confirmed", false);
-                    job.remove("declared");
-                }
+                if (job.has("sessionId") && !sessionId.equals(job.getString("sessionId"))) job.put("confirmed", false);
                 job.put("sessionId", sessionId);
                 if (validCapability(media)) job.put("capability", media);
                 save(path, job);
@@ -165,7 +160,7 @@ public final class HeliosMediaOutbox {
     /** Called only after a live or recovery finalizer returns successfully. */
     public static boolean captureFinished(String captureId, Path path, String failure) {
         try {
-            return completeCapture(defaultRoot(), captureId, path, failure);
+            return completeCapture(HeliosSink.outboxRoot().resolve("media"), captureId, path, failure);
         } catch (IOException error) { return false; }
     }
 
@@ -186,11 +181,6 @@ public final class HeliosMediaOutbox {
             }
             return durable;
         });
-    }
-
-    static Path defaultRoot() {
-        return Path.of(System.getProperty("helios.outbox.directory",
-                Path.of(System.getProperty("user.home"), ".helios", "outbox").toString())).resolve("media");
     }
 
     private static void cleanupOwnedSource(JSONObject job) {
@@ -394,13 +384,8 @@ public final class HeliosMediaOutbox {
         });
         if (job == null || !job.optBoolean("confirmed") || !job.has("sessionId")) return;
         JSONObject caps = capability != null ? capability : job.optJSONObject("capability");
-        if (!validCapability(caps)) {
-            if (!oldServerWarned) {
-                oldServerWarned = true;
-                warning.accept("This Helios server has no ERROR media support. JSON logging continues; bounded media copies are retained.");
-            }
-            return;
-        }
+        // Wait for a session start of this logger to bring the limits.
+        if (!validCapability(caps)) return;
         String kind = job.getString("kind");
         long maximum = caps.getLong("video".equals(kind) ? "maxVideoBytes" : "maxScreenshotBytes");
         if (job.has("bytes") && job.getLong("bytes") > maximum) {
@@ -416,47 +401,8 @@ public final class HeliosMediaOutbox {
         if ("pending".equals(job.getString("state")) && !upload) return;
         HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(config.baseUrl + path + (upload ? "/" + kind : "")))
                 .timeout(Duration.ofSeconds(10)).header(HeliosSink.KEY_HEADER, config.ingestKey);
-        if (upload && !job.optBoolean("declared")) {
-            HttpRequest declare = HttpRequest.newBuilder(URI.create(config.baseUrl + path)).timeout(Duration.ofSeconds(10))
-                    .header(HeliosSink.KEY_HEADER, config.ingestKey).header("Content-Type", "application/json")
-                    .PUT(HttpRequest.BodyPublishers.ofString(new JSONObject().put("kind", kind).put("state", "pending").toString())).build();
-            HttpResponse<String> declarationResponse;
-            try { declarationResponse = http.send(declare, HttpResponse.BodyHandlers.ofString()); }
-            catch (IOException failure) { retry(manifest, job, 0); return; }
-            JSONObject declarationReceipt;
-            try { declarationReceipt = new JSONObject(declarationResponse.body()); }
-            catch (RuntimeException invalid) { declarationReceipt = new JSONObject(); }
-            if (declarationResponse.statusCode() / 100 == 2 && validIdentity(job, declarationReceipt)
-                    && "pending".equals(declarationReceipt.optString("state"))) {
-                locked(root, () -> {
-                    JSONObject current = current(manifest, job);
-                    if (current != null) { current.put("declared", true); save(manifest, current); }
-                    return null;
-                });
-                job.put("declared", true);
-            } else if (declarationResponse.statusCode() / 100 == 2 && validReceipt(job, declarationReceipt, true)) {
-                discard(manifest, job);
-                return;
-            } else if ((declarationResponse.statusCode() == 404 && "parentMissing".equals(declarationReceipt.optString("code")))
-                    || (declarationResponse.statusCode() == 409 && "rowPending".equals(declarationReceipt.optString("code")))) {
-                discard(manifest, job);
-                return;
-            } else if (declarationResponse.statusCode() / 100 == 2 && validIdentity(job, declarationReceipt)
-                    && "available".equals(declarationReceipt.optString("state"))) {
-                locked(root, () -> {
-                    JSONObject current = current(manifest, job);
-                    if (current != null) { fail(current, "uploadRejected"); save(manifest, current); }
-                    return null;
-                });
-                return;
-            } else {
-                retry(manifest, job, HeliosSink.retryAfterMillis(declarationResponse.headers().firstValue("Retry-After").orElse("")));
-                return;
-            }
-        }
         if (upload) {
-            String contentType = "video".equals(kind) ? "video/mp4" : mime(bytesPath(manifest));
-            request.header("Content-Type", contentType).header("X-Helios-Media-SHA256", job.getString("sha256"))
+            request.header("Content-Type", "video".equals(kind) ? "video/mp4" : "image/png").header("X-Helios-Media-SHA256", job.getString("sha256"))
                     .PUT(HttpRequest.BodyPublishers.ofFile(bytesPath(manifest)));
         } else request.header("Content-Type", "application/json")
                 .PUT(HttpRequest.BodyPublishers.ofString(declaration(job).toString()));
@@ -540,8 +486,7 @@ public final class HeliosMediaOutbox {
             JSONObject current = current(manifest, job);
             if (current == null) return null;
             int failures = Math.min(current.optInt("failures") + 1, 5);
-            long delay = Math.max(serverDelay, Math.min(30_000L, 1000L << failures) + ThreadLocalRandom.current().nextLong(251));
-            current.put("failures", failures).put("retryAt", System.currentTimeMillis() + Math.min(delay, Long.MAX_VALUE - System.currentTimeMillis()));
+            current.put("failures", failures).put("retryAt", HeliosSink.retryAt(failures, serverDelay));
             save(manifest, current);
             return null;
         });
@@ -549,16 +494,6 @@ public final class HeliosMediaOutbox {
 
     private static boolean validCapability(JSONObject value) {
         return value != null && value.optInt("version") == 1 && value.optLong("maxScreenshotBytes") > 0 && value.optLong("maxVideoBytes") > 0;
-    }
-
-    private static String mime(Path path) throws IOException {
-        byte[] header = new byte[8];
-        try (InputStream in = Files.newInputStream(path)) {
-            int read = in.read(header);
-            if (read >= 8 && header[0] == (byte) 0x89 && header[1] == 'P' && header[2] == 'N' && header[3] == 'G') return "image/png";
-            if (read >= 3 && header[0] == (byte) 0xff && header[1] == (byte) 0xd8 && header[2] == (byte) 0xff) return "image/jpeg";
-        }
-        throw new IOException("Unsupported screenshot format");
     }
 
     static String sha256(Path path) throws IOException {
@@ -569,9 +504,7 @@ public final class HeliosMediaOutbox {
                 int count;
                 while ((count = in.read(bytes)) != -1) digest.update(bytes, 0, count);
             }
-            StringBuilder result = new StringBuilder(64);
-            for (byte value : digest.digest()) result.append(String.format("%02x", value));
-            return result.toString();
+            return HeliosSink.hex(digest.digest());
         } catch (java.security.NoSuchAlgorithmException impossible) { throw new IOException(impossible); }
     }
 

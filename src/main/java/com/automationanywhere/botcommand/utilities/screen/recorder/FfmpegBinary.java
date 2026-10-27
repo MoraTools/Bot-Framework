@@ -101,7 +101,9 @@ public final class FfmpegBinary {
                  FileLock lock = channel.lock()) {
                 if (Files.exists(target) && BUNDLED_SHA256.equalsIgnoreCase(sha256Hex(target))) return target;
                 Files.deleteIfExists(target);
-                Path tmp = Files.createTempFile(target.getParent(), "ffmpeg-", ".tmp");
+                // Fixed name, used only under the locks above: a copy left by a killed process is replaced here.
+                Path tmp = target.resolveSibling(target.getFileName() + ".tmp");
+                Files.deleteIfExists(tmp);
                 try {
                     try (InputStream in = Objects.requireNonNull(
                             FfmpegBinary.class.getResourceAsStream(JAR_RESOURCE_PATH),
@@ -115,7 +117,11 @@ public final class FfmpegBinary {
                         if (!Files.exists(target) || !BUNDLED_SHA256.equalsIgnoreCase(sha256Hex(target))) throw race;
                     }
                     return target;
-                } finally { Files.deleteIfExists(tmp); }
+                } finally {
+                    // A failed delete must not replace the exception that is already on its way out.
+                    try { Files.deleteIfExists(tmp); }
+                    catch (IOException staleCopy) { LOGGER.debug("Could not delete {}: {}", tmp, staleCopy.toString()); }
+                }
             }
         }
     }

@@ -9,6 +9,8 @@ import javax.swing.text.html.HTML;
 import javax.swing.text.html.HTMLEditorKit;
 import javax.swing.text.html.parser.ParserDelegator;
 import java.io.StringReader;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.List;
@@ -18,23 +20,25 @@ import java.util.TreeMap;
 public class MediaMarkupParityTest {
     @Test
     public void compactThumbnailsKeepEveryLinkAttributeAndBadge() throws Exception {
-        String path = "screenshots/image&amp;&lt;&gt;.png";
+        // The generator does no file I/O, so the folder does not have to exist.
+        Path dir = Paths.get("media-markup-test").toAbsolutePath();
+        // Names use only characters that every file system accepts; ' ( ) are URL-quoted, & is HTML-escaped.
+        String path = "screenshots/image&amp;%281%29%27.png";
         String image = "<img src='" + path + "' loading='lazy' decoding='async' width='88' height='50' alt='' />";
         String preview = "style='--screenshot-preview: url(\"" + path + "\")'";
         String screenshot = "<a href='" + path + "' target='_blank' class='img-link' "
                 + "aria-label='Screenshot' title='Screenshot' " + preview + ">" + image + "</a>";
-        String video = "<a href='clips/video&amp;&lt;&gt;.mp4' target='_blank' class='img-link video-link' "
+        String video = "<a href='clips/video&amp;%281%29%27.mp4' target='_blank' class='img-link video-link' "
                 + "aria-label='Recording' title='Open recording' " + preview + ">" + image
                 + "<span class='play-overlay' aria-hidden='true'>&#9654;</span></a>";
         String unavailable = "<a href='" + path + "' target='_blank' class='img-link video-unavailable' "
                 + "aria-label='Screenshot (video unavailable)' title='Video unavailable; opens screenshot' "
                 + preview + ">" + image + "<span class='no-video-badge' aria-hidden='true'>no video</span></a>";
-        String screenshotPath = "C:\\logs\\screenshots\\image&<>.png";
-        String videoPath = "C:\\logs\\clips\\video&<>.mp4";
-        assertSameMedia(screenshot, HTMLGenerator.getScreenshotHTML(screenshotPath));
-        assertSameMedia(screenshot, HTMLGenerator.getScreenCellHTML(screenshotPath, "", ""));
-        assertSameMedia(video, HTMLGenerator.getScreenCellHTML("", videoPath, screenshotPath));
-        assertSameMedia(unavailable, HTMLGenerator.getScreenCellHTML("", "", screenshotPath));
+        String screenshotPath = dir.resolve("screenshots").resolve("image&(1)'.png").toString();
+        String videoPath = dir.resolve("clips").resolve("video&(1)'.mp4").toString();
+        assertSameMedia(screenshot, HTMLGenerator.getScreenCellHTML(screenshotPath, "", "", dir));
+        assertSameMedia(video, HTMLGenerator.getScreenCellHTML("", videoPath, screenshotPath, dir));
+        assertSameMedia(unavailable, HTMLGenerator.getScreenCellHTML("", "", screenshotPath, dir));
     }
 
     private static void assertSameMedia(String oldHtml, String newHtml) throws Exception {

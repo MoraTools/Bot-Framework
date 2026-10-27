@@ -23,24 +23,25 @@ public class RingSegmentListTest {
         Process capture = null;
         try {
             Path ring = Files.createDirectory(root.resolve("ring"));
-            capture = new ProcessBuilder(ffmpeg.toString(), "-hide_banner", "-loglevel", "error", "-re",
-                    "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=5", "-t", "12", "-c:v", "ffvhuff",
-                    "-pix_fmt", "yuv420p", "-f", "segment", "-segment_time", "1", "-reset_timestamps", "1",
-                    "-segment_wrap", "4", "-segment_list", ring.resolve("list.txt").toString(),
-                    "-segment_list_size", "4", ring.resolve("%01d.mov").toString())
-                    .redirectError(ProcessBuilder.Redirect.INHERIT).start();
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            List<String> command = new java.util.ArrayList<>(List.of(ffmpeg.toString(), "-hide_banner", "-loglevel", "error", "-re",
+                    "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=5", "-t", "30"));
+            command.addAll(ScreenRecorder.ringOutputArguments(ring, 4));
+            capture = new ProcessBuilder(command).redirectError(ProcessBuilder.Redirect.INHERIT).start();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+            List<String> wrapped = List.of("1.mov", "2.mov", "3.mov", "0.mov");
             while (System.nanoTime() < deadline) {
-                if (Files.exists(ring.resolve("list.txt")) && Files.readAllLines(ring.resolve("list.txt")).size() == 4) break;
+                if (Files.exists(ring.resolve(ClipFinalizer.MANIFEST))
+                        && Files.readAllLines(ring.resolve(ClipFinalizer.MANIFEST)).equals(wrapped)) break;
                 Thread.sleep(10);
             }
             Assert.assertTrue(capture.isAlive(), "capture must still be running when the ring wraps");
             capture.destroyForcibly();
             Assert.assertTrue(capture.waitFor(5, TimeUnit.SECONDS));
-            Assert.assertEquals(Files.readAllLines(ring.resolve("list.txt")), List.of("0.mov", "1.mov", "2.mov", "3.mov"));
+            Assert.assertEquals(Files.readAllLines(ring.resolve(ClipFinalizer.MANIFEST)), wrapped,
+                    "slot 0 must have been reused, not only opened for the first time");
             for (int slot = 0; slot < 4; slot++) Files.setLastModifiedTime(ring.resolve(slot + ".mov"), FileTime.fromMillis(1000));
             List<Path> completed = ClipFinalizer.completedRingSegments(ring, 3);
-            Assert.assertEquals(completed, List.of(ring.resolve("1.mov"), ring.resolve("2.mov"), ring.resolve("3.mov")));
+            Assert.assertEquals(completed, List.of(ring.resolve("2.mov"), ring.resolve("3.mov"), ring.resolve("0.mov")));
             Path scratch = Files.createDirectory(root.resolve("scratch"));
             for (Path segment : completed) Files.copy(segment, scratch.resolve(segment.getFileName()), StandardCopyOption.COPY_ATTRIBUTES);
             ClipFinalizer.writeSegmentOrder(scratch, completed);

@@ -16,6 +16,7 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -46,8 +47,11 @@ import java.util.stream.Stream;
  *             links self-heal once the next bot run completes the sweep.</li>
  *         <li>If the ring has any complete segments, encode them into a
  *             {@code crash-recording-<id>.mp4} alongside the per-error
- *             clips.</li>
+ *             clips, when the log folder still exists.</li>
  *         <li>Append one summary line to {@code crash-log.txt}.</li>
+ *         <li>Remove {@code session.active}. A folder that stays on disk
+ *             (a media record is not durable yet) is then never salvaged
+ *             twice; only its pending scratches are retried.</li>
  *       </ul></li>
  *   <li>Delete the claimed folder after terminal recovery and durable media handling.
  *       Preserve the sources if recovery is interrupted.</li>
@@ -70,8 +74,8 @@ final class CrashSweep {
     private static final String SESSION_META = "session.meta";
     private static final String CLIPS_DIR = "clips";
     private static final String CRASH_LOG = "crash-log.txt";
-    private static final DateTimeFormatter TIMESTAMP =
-            DateTimeFormatter.ofPattern("yyyy-MM-dd-HHmmss");
+    /** A folder without session.meta is a leftover once it has been idle this long. */
+    private static final Duration ORPHAN_AGE = Duration.ofDays(1);
     private static final DateTimeFormatter LOG_TIMESTAMP =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
@@ -89,16 +93,8 @@ final class CrashSweep {
         t.start();
     }
 
-    /**
-     * Synchronous entry point used by tests. Bypasses the SCHEDULED guard so
-     * tests can drive the sweep deterministically without spinning up a
-     * daemon thread.
-     */
-    static void sweepForTest(Path appDataRoot, Path ffmpegExe) {
-        sweep(appDataRoot, ffmpegExe);
-    }
-
-    private static void sweep(Path appDataRoot, Path ffmpegExe) {
+    /** One sweep on the calling thread. {@link #scheduleOnce} runs it once per JVM on a daemon thread. */
+    static void sweep(Path appDataRoot, Path ffmpegExe) {
         Path sessionsRoot = appDataRoot.resolve("sessions");
         if (!Files.isDirectory(sessionsRoot)) {
             return;
@@ -110,7 +106,7 @@ final class CrashSweep {
             if (lock == null) return;
             try (Stream<Path> dirs = Files.list(sessionsRoot)) {
                 dirs.filter(folder -> Files.isDirectory(folder, LinkOption.NOFOLLOW_LINKS))
-                        .forEach(folder -> processOne(folder, appDataRoot, ffmpegExe));
+                        .forEach(folder -> processOne(folder, ffmpegExe));
             }
         } catch (OverlappingFileLockException busy) {
             // Another sweep in this JVM owns the root.
@@ -119,8 +115,7 @@ final class CrashSweep {
         }
     }
 
-    private static void processOne(Path folder, Path appDataRoot, Path ffmpegExe) {
-        // Missing metadata is also protected: another bot may still be starting its recorder.
+    private static void processOne(Path folder, Path ffmpegExe) {
         if (ownerMayBeRunning(folder)) return;
         String name = folder.getFileName().toString();
         Path claimed = folder;
@@ -139,7 +134,7 @@ final class CrashSweep {
         }
         try {
             if (Files.exists(claimed.resolve(SESSION_ACTIVE_MARKER)) || hasManagedScratches(claimed))
-                trySalvage(claimed, appDataRoot, ffmpegExe);
+                trySalvage(claimed, sessionId, ffmpegExe);
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             return;
@@ -147,28 +142,7 @@ final class CrashSweep {
             LOGGER.debug("Recovery failed for session {}: {}", sessionId, terminal.toString());
         }
         if (Thread.currentThread().isInterrupted() || hasManagedScratches(claimed)) return;
-        if (removeCloudSources(claimed)) {
-            ScreenRecorder.deleteRecursivelyQuietly(claimed);
-            if (!Files.exists(claimed)) RecorderStorage.recovered(appDataRoot, sessionId);
-        }
-    }
-
-    private static boolean removeCloudSources(Path folder) {
-        Path captures = folder.resolve("captures");
-        if (!Files.isDirectory(captures)) return true;
-        boolean removed = true;
-        try (Stream<Path> files = Files.list(captures)) {
-            for (Path metadata : files.filter(Files::isRegularFile).collect(java.util.stream.Collectors.toList())) {
-                try {
-                    JSONObject capture = new JSONObject(Files.readString(metadata));
-                    // ponytail: preserve shared crash originals when a local ownership upgrade could not be saved.
-                    // Add a separate durable local pin only if stale shared originals need reclamation.
-                    if (!capture.optBoolean("localRequired") && capture.optBoolean("cloudOnly"))
-                        Files.deleteIfExists(Path.of(capture.getString("target")));
-                } catch (IOException | RuntimeException retained) { removed = false; }
-            }
-        } catch (IOException ignored) { removed = false; }
-        return removed;
+        ScreenRecorder.deleteRecursivelyQuietly(claimed);
     }
 
     private static boolean hasManagedScratches(Path folder) {
@@ -182,7 +156,9 @@ final class CrashSweep {
     private static boolean ownerMayBeRunning(Path folder) {
         Path metaFile = folder.resolve(SESSION_META);
         if (!Files.exists(metaFile)) {
-            return true;
+            // Another bot may still be starting its recorder, but it writes the meta within moments.
+            // A folder we claimed ourselves, or one idle for a day, is what a failed delete left behind.
+            return !folder.getFileName().toString().endsWith(SALVAGING_SUFFIX) && !olderThanOrphanAge(folder);
         }
         try {
             SessionMeta meta = SessionMeta.read(metaFile);
@@ -193,12 +169,16 @@ final class CrashSweep {
         }
     }
 
-    private static void trySalvage(Path claimedFolder, Path appDataRoot, Path ffmpegExe)
+    private static boolean olderThanOrphanAge(Path folder) {
+        try {
+            return Files.getLastModifiedTime(folder).toInstant().isBefore(Instant.now().minus(ORPHAN_AGE));
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    private static void trySalvage(Path claimedFolder, String sessionId, Path ffmpegExe)
             throws IOException, InterruptedException {
-        String folderName = claimedFolder.getFileName().toString();
-        String sessionId = folderName.endsWith(SALVAGING_SUFFIX)
-                ? folderName.substring(0, folderName.length() - SALVAGING_SUFFIX.length())
-                : folderName;
         Path metaFile = claimedFolder.resolve(SESSION_META);
 
         SessionMeta meta;
@@ -214,37 +194,31 @@ final class CrashSweep {
         // 1. Per-error scratches: re-encode each into the exact path the HTML
         //    log already references. This is the load-bearing recovery for
         //    drain-timeout / kill-mid-encode scenarios.
-        List<Path> recoveredClips = recoverPendingScratches(claimedFolder, ffmpegExe, mode,
-                logDir, sessionId, appDataRoot);
+        List<Path> recoveredClips = recoverPendingScratches(claimedFolder, ffmpegExe, mode, logDir, sessionId);
 
         // 2. Ring buffer: produce one crash-recording-<id>.mp4 alongside the
         //    per-error clips. Useful for hard-kill cases where the ring still
         //    holds the last bufferSeconds of footage; mostly noise for clean
         //    drain-timeout cases (ring content is "moment of close") but
-        //    cheap and consistent.
-        Path crashRecording = hasCloudOnlyRing(appDataRoot, sessionId)
-                ? null : trySalvageRing(claimedFolder, ffmpegExe, mode, logDir, sessionId, appDataRoot, meta.bufferSeconds);
+        //    cheap and consistent. Only while the marker exists: it is removed
+        //    below, so a folder that stays on disk is not salvaged again. Not
+        //    when the log folder is gone: nothing could link to the recording.
+        Path marker = claimedFolder.resolve(SESSION_ACTIVE_MARKER);
+        Path crashRecording = !Files.exists(marker) || logDir == null
+                ? null : trySalvageRing(claimedFolder, ffmpegExe, mode, logDir, sessionId, meta.bufferSeconds);
 
         if (!recoveredClips.isEmpty() || crashRecording != null) {
             Path summaryDir = crashRecording != null ? crashRecording.getParent()
                     : recoveredClips.get(0).getParent();
             appendCrashLog(summaryDir, meta, crashRecording, recoveredClips);
         }
-    }
-
-    private static boolean hasCloudOnlyRing(Path appDataRoot, String sessionId) {
-        Path reservation = appDataRoot.resolve("cloud-capture-admission").resolve(sessionId + ".json");
-        if (!Files.isRegularFile(reservation)) return false;
-        try { return new JSONObject(Files.readString(reservation)).optLong("ring") > 0; }
-        catch (IOException | RuntimeException unknown) { return true; }
+        if (Thread.currentThread().isInterrupted()) throw new InterruptedException("Recovery interrupted");
+        Files.deleteIfExists(marker);
     }
 
     /**
      * Resolves the original logDir from {@link SessionMeta} if it still
-     * exists on disk, otherwise returns null. The {@code salvaged/} fallback
-     * for the ring crash-recording is computed separately because per-error
-     * clips have no useful fallback when the logDir is gone (the HTML log
-     * referencing them is also gone).
+     * exists on disk, otherwise returns null.
      */
     private static Path resolveLogDir(SessionMeta meta) {
         if (meta.logDir == null || meta.logDir.isEmpty()) {
@@ -263,8 +237,7 @@ final class CrashSweep {
      *
      * <p>If the original logDir is gone, the per-error clips are dropped on
      * the floor: the HTML log they would have populated is also gone, so
-     * orphan mp4s under {@code salvaged/} would be unreachable and just leak
-     * disk. Skip and let the scratches be cleaned along with the rest of
+     * orphan mp4s would be unreachable and just leak disk. Skip and let the scratches be cleaned along with the rest of
      * the session folder.
      *
      * @return the absolute paths of clips that were successfully encoded in
@@ -272,9 +245,8 @@ final class CrashSweep {
      *         missing, or when every scratch failed to encode).
      */
     private static List<Path> recoverPendingScratches(Path claimedFolder, Path ffmpegExe,
-                                                      EncodingMode mode, Path logDir,
-                                                      String sessionId, Path appDataRoot)
-            throws IOException, InterruptedException {
+                                                      EncodingMode mode, Path logDir, String sessionId)
+            throws InterruptedException {
         Path scratchRoot = claimedFolder.resolve(SCRATCH_DIR);
         if (!Files.isDirectory(scratchRoot)) return List.of();
         if (logDir == null && !hasManagedScratches(claimedFolder)) {
@@ -324,17 +296,14 @@ final class CrashSweep {
             Path target = Path.of(capture.getString("target"));
             // An existing target is not proof that the interrupted finalizer returned.
             try {
-                ClipFinalizer.encodeSegmentsToMp4(ffmpeg, scratch, target, mode,
-                        capture.optBoolean("cloudOnly") ? 8L * 1024 * 1024 : Long.MAX_VALUE);
+                ClipFinalizer.encodeSegmentsToMp4(ffmpeg, scratch, target, mode);
             } catch (IOException terminal) {
-                if (HeliosMediaOutbox.captureFinished(capture.getString("captureId"), null,
-                        terminal instanceof ClipFinalizer.TooLargeException ? "tooLarge" : "encodeFailed"))
+                if (HeliosMediaOutbox.captureFinished(capture.getString("captureId"), null, "encodeFailed"))
                     ScreenRecorder.deleteRecursivelyQuietly(scratch);
                 return;
             }
             if (!HeliosMediaOutbox.captureFinished(capture.getString("captureId"), target, null)) return;
             recovered.add(target);
-            if (!capture.optBoolean("localRequired") && capture.optBoolean("cloudOnly")) Files.deleteIfExists(target);
             ScreenRecorder.deleteRecursivelyQuietly(scratch);
         } catch (IOException retained) {
             LOGGER.debug("Could not finish managed recovery at {}: {}", scratch, retained.toString());
@@ -344,42 +313,33 @@ final class CrashSweep {
     }
 
     /**
-     * Encodes the ring buffer to {@code <logDir>/clips/crash-recording-<id>.mp4}
-     * (or {@code salvaged/<stamp>-<id>.mp4} if the original logDir is gone).
+     * Encodes the ring buffer to {@code <logDir>/clips/crash-recording-<id>.mp4}.
      * Returns the encoded path, or null when the ring is empty or the encode
      * fails.
      */
     private static Path trySalvageRing(Path claimedFolder, Path ffmpegExe, EncodingMode mode,
-                                       Path logDir, String sessionId, Path appDataRoot, int bufferSeconds)
-            throws IOException, InterruptedException {
+                                       Path logDir, String sessionId, int bufferSeconds)
+            throws InterruptedException {
         Path ringDir = claimedFolder.resolve(RING_DIR);
         if (!Files.isDirectory(ringDir)) {
             LOGGER.debug("No ring/ in session {}; skipping ring salvage", sessionId);
             return null;
         }
-        Path target = resolveRingTarget(logDir, sessionId, appDataRoot);
+        Path target = logDir.resolve(CLIPS_DIR).resolve("crash-recording-" + sessionId + ".mp4");
         try {
             Files.createDirectories(target.getParent());
-            List<Path> segments = Files.exists(ringDir.resolve("list.txt"))
+            List<Path> segments = Files.exists(ringDir.resolve(ClipFinalizer.MANIFEST))
                     ? ClipFinalizer.completedRingSegments(ringDir, bufferSeconds)
                     : ClipFinalizer.listMovFilesByMtimeAsc(ringDir);
-            ClipFinalizer.encodeSegmentsToMp4(ffmpegExe, ringDir, target, mode, Long.MAX_VALUE, segments);
+            ClipFinalizer.encodeSegmentsToMp4(ffmpegExe, ringDir, target, mode, segments);
             LOGGER.info("Salvaged ring buffer for session {} -> {}", sessionId, target);
             return target;
-        } catch (IOException e) {
+        } catch (IOException | RuntimeException e) {
             // Empty rings are normal when stage-1 produced nothing usable; log
             // at debug to avoid alarming users with a stack-y warning.
             LOGGER.debug("Ring salvage skipped for session {}: {}", sessionId, e.toString());
             return null;
         }
-    }
-
-    private static Path resolveRingTarget(Path logDir, String sessionId, Path appDataRoot) {
-        if (logDir != null) {
-            return logDir.resolve(CLIPS_DIR).resolve("crash-recording-" + sessionId + ".mp4");
-        }
-        String stamp = TIMESTAMP.format(Instant.now().atZone(java.time.ZoneId.systemDefault()));
-        return appDataRoot.resolve("salvaged").resolve(stamp + "-" + sessionId + ".mp4");
     }
 
     private static void appendCrashLog(Path clipsDir, SessionMeta meta, Path crashRecording,

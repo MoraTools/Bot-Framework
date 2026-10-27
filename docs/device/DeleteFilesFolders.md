@@ -5,6 +5,10 @@
 `Clean Directory` removes files and/or folders within a specified directory based on a set of rules, including age
 threshold, selection method, and skip patterns. The base folder itself is never deleted, only its contents.
 
+Windows junctions inside the base folder are not entered and not deleted, so files in a junction target are never
+removed. The folder that holds a junction is kept. A junction given as the base folder itself is cleaned like a normal
+folder.
+
 ![image](https://github.com/A360-Tools/Bot-Framework/assets/82057278/c7646e32-4c73-4d54-a6e1-18ec92d5c37d)
 
 ## Parameters

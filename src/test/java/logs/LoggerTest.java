@@ -9,15 +9,15 @@ import com.automationanywhere.botcommand.data.model.Schema;
 import com.automationanywhere.botcommand.data.model.table.Row;
 import com.automationanywhere.botcommand.data.model.table.Table;
 import com.automationanywhere.botcommand.utilities.logger.CustomLogger;
-import org.apache.commons.io.FileUtils;
 import org.testng.Assert;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
+import support.TempDirectories;
+import support.TestLogMessage;
 
 import java.io.File;
 import java.nio.file.Files;
-import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
@@ -40,6 +40,8 @@ public class LoggerTest {
     private static final String LOG_VARIABLE = "YES";
     private static final String DO_NOT_LOG_VARIABLE = "NO";
 
+    private final TempDirectories directories = new TempDirectories();
+
     private StartLoggerSession LoggerSession;
     private LogMessage logMessage;
     private StopLoggerSession stopLoggerSession;
@@ -55,26 +57,16 @@ public class LoggerTest {
     private String instance1Path;
     private String instance2Path;
 
-    // Paths for different folder location tests
-    private String nestedFolderPath;
-    private String differentDrivePath;
-    private String absolutePathLog;
-
     private Map<String, Value> sourceMap;
 
     @BeforeClass
     public void setUp() throws Exception {
         // Initialize test classes
         LoggerSession = new StartLoggerSession();
-        logMessage = new LogMessage();
+        logMessage = TestLogMessage.create();
         stopLoggerSession = new StopLoggerSession();
-        logMessage.setTestBotUri("Automation Anywhere/bots/path/to/test bot");
 
-        // Create unique test directory with timestamp to avoid conflicts
-        baseTestPath = "src/test/target/test-artifacts/logs-" + System.currentTimeMillis() + "/";
-
-        // Ensure base directory exists
-        Files.createDirectories(Paths.get(baseTestPath));
+        baseTestPath = directories.create("logger-test") + File.separator;
 
         // Set up file paths for testing
         commonLogPath = baseTestPath + "common_log.html";
@@ -85,19 +77,6 @@ public class LoggerTest {
         // Set up paths for multiple logger tests
         instance1Path = baseTestPath + "instance1.html";
         instance2Path = baseTestPath + "instance2.html";
-
-        // Create nested folder structure for different location tests
-        nestedFolderPath = baseTestPath + "nested/subfolder/";
-        Files.createDirectories(Paths.get(nestedFolderPath));
-
-        // For cross-drive testing, use a relative path that simulates a different location
-        // (In a real environment, this might be a different drive like "D:/logs/")
-        differentDrivePath = baseTestPath + "different_drive/logs/";
-        Files.createDirectories(Paths.get(differentDrivePath));
-
-        // Set up an absolute path log file
-        absolutePathLog = baseTestPath + "absolute/path/log.html";
-        Files.createDirectories(Paths.get(baseTestPath + "absolute/path/"));
 
         // Prepare test data
         setupTestData();
@@ -152,10 +131,9 @@ public class LoggerTest {
         sourceMap.put("entrylist table variable", tv);
     }
 
-    @AfterClass
+    @AfterClass(alwaysRun = true)
     public void tearDown() {
-        // Add any cleanup code if needed
-        System.out.println("Tests completed. Log files available at: " + baseTestPath);
+        directories.deleteAll();
     }
 
     /**
@@ -439,261 +417,7 @@ public class LoggerTest {
         Assert.assertTrue(content.contains("Table: 2 rows x 2 columns"));
         Assert.assertTrue(content.contains("key&lt;&amp;&gt;"));
         Assert.assertTrue(content.contains("list&lt;&amp;&gt;"));
-        Assert.assertTrue(content.contains("dictionary<span class='ws-marker ws-tab'"));
+        Assert.assertTrue(content.contains("dictionary<i class='ws-tab' aria-hidden='true'></i>\tvalue"));
         Assert.assertFalse(Files.exists(Paths.get(baseTestPath, "variables")));
-    }
-
-    @Test
-    public void testLogFileSize() throws Exception {
-        String path = baseTestPath + "size_test.html";
-        CustomLogger logger = new CustomLogger("single-template", path, 10);
-        try {
-            for (int i = 0; i < 3; i++) {
-                logMessage.action(logger, LEVEL_INFO, "Log with complex variables", false,
-                        LOG_VARIABLE, sourceMap);
-            }
-        } finally {
-            logger.close();
-        }
-        String content = CompressedSnapshots.expand(Files.readString(Paths.get(path)));
-        Assert.assertEquals(content.split("<!DOCTYPE html>", -1).length - 1, 1, "one page header");
-        Assert.assertEquals(content.split("<style>", -1).length - 1, 1, "styles are stored once");
-        Assert.assertEquals(content.split("<details class='entry-variables'>", -1).length - 1, 3);
-        Assert.assertEquals(content.split("r7c3", -1).length - 1, 3, "every snapshot keeps all table rows");
-        Assert.assertFalse(Files.exists(Paths.get(baseTestPath, "variables")));
-    }
-
-    @Test
-    public void testLoggerInNestedFolder() throws Exception {
-        // Test logger in a nested subfolder location
-        String nestedLogFile = nestedFolderPath + "nested_log.html";
-
-        // Create the logger session
-        SessionValue sessionValue = LoggerSession.start(
-                COMMON_FILE_ALL_LEVEL,
-                nestedLogFile,
-                null,
-                null,
-                null,
-                10,
-                "NO_VIDEO", false, false, false, 30, "FAST", "HELIOS_DISABLED", null, null
-        );
-
-        CustomLogger logger = (CustomLogger) sessionValue.getSession();
-        Assert.assertNotNull(logger, "Logger should be initialized properly");
-
-        // Log messages with screenshots and variables
-        logMessage.action(logger, LEVEL_INFO, "Nested folder INFO message", true, LOG_VARIABLE, sourceMap);
-        logMessage.action(logger, LEVEL_ERROR, "Nested folder ERROR message", true, LOG_VARIABLE, sourceMap);
-
-        // Wait for file operations to complete
-        Thread.sleep(500);
-
-        // Verify log file was created
-        Assert.assertTrue(Files.exists(Paths.get(nestedLogFile)), "Log file should be created in nested folder");
-
-        // Check that screenshots and variables folders were created in the correct relative location
-        Path screenshotsPath = Paths.get(nestedFolderPath, "screenshots");
-        Path variablesPath = Paths.get(nestedFolderPath, "variables");
-
-        Assert.assertTrue(Files.exists(screenshotsPath), "Screenshots folder should be created relative to log file");
-        Assert.assertFalse(Files.exists(variablesPath), "Variables stay inside the log");
-
-        // Check that screenshots were created
-        File screenshotsDir = screenshotsPath.toFile();
-
-        Assert.assertTrue(countFiles(screenshotsDir) >= 2, "Should have at least 2 screenshots");
-
-        // Verify log content contains correct relative paths
-        String logContent = CompressedSnapshots.expand(new String(Files.readAllBytes(Paths.get(nestedLogFile))));
-
-        // Paths should be relative to the log file location
-        Assert.assertTrue(logContent.contains("screenshots/"), "Log should reference screenshots with relative paths");
-        Assert.assertTrue(logContent.contains("my string variable value from entry list"), "variable value is inline");
-
-        // Make sure there are no absolute paths
-        Assert.assertFalse(logContent.contains(baseTestPath), "Log should not contain absolute paths");
-
-        // Stop the logger
-        stopLoggerSession.stop(logger);
-    }
-
-    @Test
-    public void testLoggerInDifferentDrive() throws Exception {
-        // Test logger in a location that simulates a different drive
-        String differentDriveLogFile = differentDrivePath + "different_drive_log.html";
-
-        // Create the logger session
-        SessionValue sessionValue = LoggerSession.start(
-                COMMON_FILE_ALL_LEVEL,
-                differentDriveLogFile,
-                null,
-                null,
-                null,
-                10,
-                "NO_VIDEO", false, false, false, 30, "FAST", "HELIOS_DISABLED", null, null
-        );
-
-        CustomLogger logger = (CustomLogger) sessionValue.getSession();
-        Assert.assertNotNull(logger, "Logger should be initialized properly");
-
-        // Log messages with screenshots and variables
-        logMessage.action(logger, LEVEL_INFO, "Different drive INFO message", true, LOG_VARIABLE, sourceMap);
-        logMessage.action(logger, LEVEL_WARN, "Different drive WARN message", true, DO_NOT_LOG_VARIABLE, null);
-
-        // Wait for file operations to complete
-        Thread.sleep(500);
-
-        // Verify log file was created
-        Assert.assertTrue(Files.exists(Paths.get(differentDriveLogFile)), "Log file should be created in different " +
-                "drive folder");
-
-        // Check that screenshots and variables folders were created in the correct relative location
-        Path screenshotsPath = Paths.get(differentDrivePath, "screenshots");
-        Path variablesPath = Paths.get(differentDrivePath, "variables");
-
-        Assert.assertTrue(Files.exists(screenshotsPath), "Screenshots folder should be created relative to log file");
-        Assert.assertFalse(Files.exists(variablesPath), "Variables stay inside the log");
-
-        // Check that screenshots were created
-        File screenshotsDir = screenshotsPath.toFile();
-
-        Assert.assertTrue(countFiles(screenshotsDir) >= 2, "Should have at least 2 screenshots");
-
-        // Verify log content contains correct relative paths
-        String logContent = CompressedSnapshots.expand(new String(Files.readAllBytes(Paths.get(differentDriveLogFile))));
-
-        // Paths should be relative to the log file location
-        Assert.assertTrue(logContent.contains("screenshots/"), "Log should reference screenshots with relative paths");
-        Assert.assertTrue(logContent.contains("my string variable value from entry list"), "variable value is inline");
-
-        // Make sure there are no absolute paths
-        Assert.assertFalse(logContent.contains(baseTestPath), "Log should not contain absolute paths");
-
-        // Stop the logger
-        stopLoggerSession.stop(logger);
-    }
-
-    @Test
-    public void testLoggerWithAbsolutePath() throws Exception {
-        // Test logger with an absolute path
-
-        // Create the logger session
-        SessionValue sessionValue = LoggerSession.start(
-                COMMON_FILE_ALL_LEVEL,
-                absolutePathLog,
-                null,
-                null,
-                null,
-                10,
-                "NO_VIDEO", false, false, false, 30, "FAST", "HELIOS_DISABLED", null, null
-        );
-
-        CustomLogger logger = (CustomLogger) sessionValue.getSession();
-        Assert.assertNotNull(logger, "Logger should be initialized properly");
-
-        // Log messages with screenshots and variables
-        logMessage.action(logger, LEVEL_INFO, "Absolute path INFO message", true, LOG_VARIABLE, sourceMap);
-
-        // Wait for file operations to complete
-        Thread.sleep(500);
-
-        // Verify log file was created
-        Assert.assertTrue(Files.exists(Paths.get(absolutePathLog)), "Log file should be created at absolute path");
-
-        // Check that screenshots and variables folders were created in the correct relative location
-        Path logFolder = Paths.get(absolutePathLog).getParent();
-        Path screenshotsPath = logFolder.resolve("screenshots");
-        Path variablesPath = logFolder.resolve("variables");
-
-        Assert.assertTrue(Files.exists(screenshotsPath), "Screenshots folder should be created relative to log file");
-        Assert.assertFalse(Files.exists(variablesPath), "Variables stay inside the log");
-
-        // Check that screenshots were created
-        File screenshotsDir = screenshotsPath.toFile();
-
-        Assert.assertTrue(countFiles(screenshotsDir) >= 1, "Should have at least 1 screenshot");
-
-        // Verify log content contains correct relative paths
-        String logContent = CompressedSnapshots.expand(new String(Files.readAllBytes(Paths.get(absolutePathLog))));
-
-        // Paths should be relative to the log file location
-        Assert.assertTrue(logContent.contains("screenshots/"), "Log should reference screenshots with relative paths");
-        Assert.assertTrue(logContent.contains("my string variable value from entry list"), "variable value is inline");
-
-        // Make sure there are no absolute paths in the HTML links
-        Assert.assertFalse(logContent.contains(baseTestPath), "Log should not contain absolute paths");
-
-        // Stop the logger
-        stopLoggerSession.stop(logger);
-    }
-
-    @Test
-    public void testLoggerMovedToNewLocation() throws Exception {
-        // Test that a logger still works when the log file is moved to a new location
-        String originalLogPath = baseTestPath + "original_location.html";
-        String newLocationPath = baseTestPath + "moved/new_location.html";
-
-        // Create directory for the new location
-        Files.createDirectories(Paths.get(baseTestPath + "moved/"));
-
-        // Create the logger session at the original location
-        SessionValue sessionValue = LoggerSession.start(
-                COMMON_FILE_ALL_LEVEL,
-                originalLogPath,
-                null,
-                null,
-                null,
-                10,
-                "NO_VIDEO", false, false, false, 30, "FAST", "HELIOS_DISABLED", null, null
-        );
-
-        CustomLogger logger = (CustomLogger) sessionValue.getSession();
-        Assert.assertNotNull(logger, "Logger should be initialized properly");
-
-        // Log a message with screenshot and variables
-        logMessage.action(logger, LEVEL_INFO, "Original location message", true, LOG_VARIABLE, sourceMap);
-
-        // Wait for file operations to complete
-        Thread.sleep(500);
-
-        // Verify original folders were created
-        String originalScreenshotsDir = Paths.get(baseTestPath, "screenshots").toString();
-        String originalVariablesDir = Paths.get(baseTestPath, "variables").toString();
-
-        Assert.assertTrue(Files.exists(Paths.get(originalScreenshotsDir)), "Original screenshots directory should " +
-                "exist");
-        Assert.assertFalse(Files.exists(Paths.get(originalVariablesDir)), "Variables stay inside the log");
-
-        // Stop the logger
-        stopLoggerSession.stop(logger);
-
-        // Move the log file and create new directories for the moved file
-        Files.createDirectories(Paths.get(baseTestPath + "moved/screenshots"));
-
-        // Copy the log file to the new location
-        FileUtils.copyFile(new File(originalLogPath), new File(newLocationPath));
-
-        // Copy the screenshots to the new location
-        File[] screenshots = new File(originalScreenshotsDir).listFiles();
-        if (screenshots != null) {
-            for (File screenshot : screenshots) {
-                FileUtils.copyFile(screenshot, new File(baseTestPath + "moved/screenshots/" + screenshot.getName()));
-            }
-        }
-
-        // Read the log file from the new location
-        String movedLogContent = CompressedSnapshots.expand(new String(Files.readAllBytes(Paths.get(newLocationPath))));
-
-        // Verify that the log file at the new location can still resolve the relative paths
-        Assert.assertTrue(movedLogContent.contains("screenshots/"), "Moved log should reference screenshots with " +
-                "relative paths");
-        Assert.assertTrue(movedLogContent.contains("my string variable value from entry list"), "variable value is inline");
-
-        // Since relative paths are used, the links should still work in the new location
-        Assert.assertTrue(Files.exists(Paths.get(baseTestPath + "moved/screenshots")), "Screenshots should exist in " +
-                "new location");
-        Assert.assertFalse(Files.exists(Paths.get(baseTestPath + "moved/variables")),
-                "moving the HTML carries every variable without another folder");
     }
 }

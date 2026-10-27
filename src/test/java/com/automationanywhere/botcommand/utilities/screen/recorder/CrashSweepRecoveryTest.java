@@ -2,8 +2,6 @@ package com.automationanywhere.botcommand.utilities.screen.recorder;
 
 import screen.process.RecorderTestSupport;
 
-import org.apache.logging.log4j.Level;
-import org.json.JSONArray;
 import org.json.JSONObject;
 import org.testng.Assert;
 import org.testng.annotations.AfterMethod;
@@ -34,11 +32,10 @@ import java.util.stream.Stream;
  * copied into a fixture {@code scratch/<uuid>/} layout, plus
  * {@code session.meta} and {@code session.active}) rather than fighting
  * the recorder lifecycle, then drives the sweep synchronously via
- * {@link CrashSweep#sweepForTest(Path, Path)}.
+ * {@link CrashSweep#sweep(Path, Path)}.
  *
  * <p>Lives in the same package as {@code CrashSweep} so it can call the
- * package-private {@code sweepForTest} entry point without exposing it
- * publicly.
+ * package-private {@code sweep} without exposing it publicly.
  */
 public class CrashSweepRecoveryTest {
 
@@ -88,7 +85,7 @@ public class CrashSweepRecoveryTest {
         Assert.assertFalse(Files.exists(expectedClip1), "fixture must start with no recovered clips");
         Assert.assertFalse(Files.exists(expectedClip2), "fixture must start with no recovered clips");
 
-        CrashSweep.sweepForTest(appDataRoot, ffmpegExe);
+        CrashSweep.sweep(appDataRoot, ffmpegExe);
 
         Assert.assertTrue(Files.exists(expectedClip1),
                 "scratch for uuid1 must be recovered to " + expectedClip1);
@@ -137,7 +134,7 @@ public class CrashSweepRecoveryTest {
         byte[] sentinel = "PREVIOUSLY_RECOVERED".getBytes(StandardCharsets.UTF_8);
         Files.write(target, sentinel);
 
-        CrashSweep.sweepForTest(appDataRoot, ffmpegExe);
+        CrashSweep.sweep(appDataRoot, ffmpegExe);
 
         Assert.assertTrue(Files.exists(target));
         Assert.assertEquals(Files.readAllBytes(target), sentinel,
@@ -145,7 +142,7 @@ public class CrashSweepRecoveryTest {
     }
 
     @Test
-    public void missingLogDirSkipsScratchSalvageButFallsBackForRing() throws Exception {
+    public void missingLogDirSkipsScratchAndRingSalvageAndRemovesTheSession() throws Exception {
         seedFfvhuffSegments(seedSegmentsDir, 3);
 
         String sessionId = UUID.randomUUID().toString();
@@ -161,21 +158,17 @@ public class CrashSweepRecoveryTest {
                 EncodingMode.COMPACT);
         Files.createFile(sessionFolder.resolve("session.active"));
 
-        CrashSweep.sweepForTest(appDataRoot, ffmpegExe);
+        CrashSweep.sweep(appDataRoot, ffmpegExe);
 
         // Per-error clip drops on the floor (HTML log is also gone, so an
         // orphan mp4 wouldn't be reachable).
         Assert.assertFalse(Files.exists(missingLogDir.resolve("clips").resolve(uuid + ".mp4")));
 
-        // Ring still gets salvaged to the salvaged/ fallback so the user has
-        // some artifact to inspect.
-        Path salvagedDir = appDataRoot.resolve("salvaged");
-        Assert.assertTrue(Files.isDirectory(salvagedDir),
-                "salvaged/ fallback dir should be created");
-        long fallbackCount = countByExt(salvagedDir, ".mp4");
-        Assert.assertEquals(fallbackCount, 1L,
-                "ring should be salvaged to salvaged/<stamp>-<id>.mp4; got "
-                        + fallbackCount + " mp4s");
+        // The ring is not encoded either: nothing could link to it.
+        Assert.assertFalse(Files.exists(appDataRoot.resolve("salvaged")), "no fallback folder");
+        Assert.assertFalse(Files.exists(missingLogDir), "the sweep must not recreate the log folder");
+        Assert.assertFalse(Files.exists(sessionFolder), "the dead session is removed");
+        Assert.assertFalse(Files.exists(sessionFolder.resolveSibling(sessionId + ".salvaging")));
     }
 
     @Test
@@ -194,7 +187,7 @@ public class CrashSweepRecoveryTest {
         writeSessionMeta(sessionFolder, sessionId, EncodingMode.COMPACT);
         Files.createFile(sessionFolder.resolve("session.active"));
 
-        CrashSweep.sweepForTest(appDataRoot, ffmpegExe);
+        CrashSweep.sweep(appDataRoot, ffmpegExe);
 
         Path clipsDir = logDir.resolve("clips");
         Assert.assertTrue(Files.exists(clipsDir.resolve(goodUuid + ".mp4")),
@@ -216,7 +209,7 @@ public class CrashSweepRecoveryTest {
         writeSessionMeta(sessionFolder, sessionId, EncodingMode.FAST);
         Files.createFile(sessionFolder.resolve("session.active"));
 
-        CrashSweep.sweepForTest(appDataRoot, ffmpegExe);
+        CrashSweep.sweep(appDataRoot, ffmpegExe);
 
         Path target = logDir.resolve("clips").resolve(uuid + ".mp4");
         Assert.assertTrue(Files.exists(target));
@@ -322,27 +315,14 @@ public class CrashSweepRecoveryTest {
             throws IOException {
         Files.createDirectories(sessionFolder);
         JSONObject json = new JSONObject();
-        json.put("schemaVersion", SessionMeta.CURRENT_SCHEMA_VERSION);
         json.put("sessionId", sessionId);
         json.put("logDir", metaLogDir.toAbsolutePath().toString());
         json.put("bufferSeconds", 5);
-        json.put("recordingLevels", new JSONArray(new String[]{Level.ERROR.toString()}));
         json.put("startedAt", Instant.now().toString());
-        json.put("packageVersion", "test");
         json.put("jvmPid", ProcessHandle.current().pid() + 1L);
         json.put("encodingMode", mode.name());
         Files.write(sessionFolder.resolve("session.meta"),
                 json.toString(2).getBytes(StandardCharsets.UTF_8));
-    }
-
-    private static long countByExt(Path dir, String ext) throws IOException {
-        if (!Files.isDirectory(dir)) {
-            return 0L;
-        }
-        try (Stream<Path> s = Files.list(dir)) {
-            return s.filter(p -> p.toString().toLowerCase().endsWith(ext.toLowerCase()))
-                    .count();
-        }
     }
 
 }

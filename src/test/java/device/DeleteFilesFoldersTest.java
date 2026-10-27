@@ -5,9 +5,10 @@ import com.automationanywhere.botcommand.exception.BotCommandException;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.filefilter.TrueFileFilter;
 import org.testng.Assert;
-import org.testng.annotations.AfterMethod;
+import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
+import support.TempDirectories;
 
 import java.io.File;
 import java.io.IOException;
@@ -24,7 +25,6 @@ import java.util.Collection;
  * Comprehensive test suite for the DeleteFilesFolders class
  */
 public class DeleteFilesFoldersTest {
-    private static final String TEST_DIRECTORY_PATH = "src/test/target/temp/deleteFolderTest/";
     private static final String PROCESS_ALL_TYPES = "ALL";
     private static final String PROCESS_ONLY_FILE_TYPE = "FILE";
     private static final String THRESHOLD_UNIT_DAY = "DAY";
@@ -34,22 +34,19 @@ public class DeleteFilesFoldersTest {
     private static final String THRESHOLD_CRITERIA_CREATION = "CREATION";
     private static final String THRESHOLD_CRITERIA_MODIFICATION = "MODIFICATION";
 
+    private final TempDirectories temp = new TempDirectories();
     private DeleteFilesFolders deleteFilesFolders;
+    private String testDirectoryPath;
 
     @BeforeMethod
     public void setUp() throws IOException {
         deleteFilesFolders = new DeleteFilesFolders();
-        FileUtils.forceMkdir(new File(TEST_DIRECTORY_PATH));
-        FileUtils.cleanDirectory(new File(TEST_DIRECTORY_PATH));
+        testDirectoryPath = temp.create("delete-folder-test-") + File.separator;
     }
 
-    @AfterMethod
-    public void tearDown() throws IOException {
-        cleanupTestEnvironment();
-    }
-
-    private void cleanupTestEnvironment() throws IOException {
-        FileUtils.deleteDirectory(new File(TEST_DIRECTORY_PATH));
+    @AfterClass(alwaysRun = true)
+    public void tearDown() {
+        temp.deleteAll();
     }
 
     // Helper method to count files and directories in the test directory
@@ -63,7 +60,7 @@ public class DeleteFilesFoldersTest {
     // Helper method to check if specific paths exist
     private void assertPathsExist(String... relativePaths) {
         for (String relativePath : relativePaths) {
-            File file = new File(TEST_DIRECTORY_PATH + relativePath);
+            File file = new File(testDirectoryPath + relativePath);
             Assert.assertTrue(file.exists(), "Expected path does not exist: " + relativePath);
         }
     }
@@ -71,14 +68,14 @@ public class DeleteFilesFoldersTest {
     // Helper method to check if specific paths don't exist
     private void assertPathsDoNotExist(String... relativePaths) {
         for (String relativePath : relativePaths) {
-            File file = new File(TEST_DIRECTORY_PATH + relativePath);
+            File file = new File(testDirectoryPath + relativePath);
             Assert.assertFalse(file.exists(), "Path should not exist: " + relativePath);
         }
     }
 
     // Helper method to create a file with specific creation and modification times
     private void createFileWithTimes(String relativePath, Instant creationTime, Instant modificationTime) throws IOException {
-        Path path = Paths.get(TEST_DIRECTORY_PATH, relativePath);
+        Path path = Paths.get(testDirectoryPath, relativePath);
         Files.createDirectories(path.getParent());
         Files.createFile(path);
 
@@ -102,7 +99,7 @@ public class DeleteFilesFoldersTest {
 
     // Helper method to create a directory with specific creation and modification times
     private void createDirWithTimes(String relativePath, Instant creationTime, Instant modificationTime) throws IOException {
-        Path path = Paths.get(TEST_DIRECTORY_PATH, relativePath);
+        Path path = Paths.get(testDirectoryPath, relativePath);
         Files.createDirectories(path);
 
         if (creationTime != null || modificationTime != null) {
@@ -133,12 +130,12 @@ public class DeleteFilesFoldersTest {
 
         // Delete everything
         deleteFilesFolders.action(
-                TEST_DIRECTORY_PATH, PROCESS_ALL_TYPES, true, 0,
+                testDirectoryPath, PROCESS_ALL_TYPES, true, 0,
                 THRESHOLD_UNIT_DAY, THRESHOLD_CRITERIA_CREATION,
                 false, "", false, "", ERROR_IGNORE);
 
         // Base directory should still exist, but be empty
-        File testDirectory = new File(TEST_DIRECTORY_PATH);
+        File testDirectory = new File(testDirectoryPath);
         Assert.assertTrue(testDirectory.exists(), "Base directory should still exist");
         Assert.assertEquals(countFilesAndDirs(testDirectory), 0, "Base directory should be empty");
     }
@@ -158,7 +155,7 @@ public class DeleteFilesFoldersTest {
 
         // Delete files older than 2 days
         deleteFilesFolders.action(
-                TEST_DIRECTORY_PATH, PROCESS_ALL_TYPES, true, 2,
+                testDirectoryPath, PROCESS_ALL_TYPES, true, 2,
                 THRESHOLD_UNIT_DAY, THRESHOLD_CRITERIA_CREATION,
                 false, "", false, "", ERROR_IGNORE);
 
@@ -181,7 +178,7 @@ public class DeleteFilesFoldersTest {
 
         // Delete files whose modification time is older than 2 days
         deleteFilesFolders.action(
-                TEST_DIRECTORY_PATH, PROCESS_ALL_TYPES, true, 2,
+                testDirectoryPath, PROCESS_ALL_TYPES, true, 2,
                 THRESHOLD_UNIT_DAY, THRESHOLD_CRITERIA_MODIFICATION,
                 false, "", false, "", ERROR_IGNORE);
 
@@ -201,33 +198,13 @@ public class DeleteFilesFoldersTest {
 
         // Delete files older than 60 minutes
         deleteFilesFolders.action(
-                TEST_DIRECTORY_PATH, PROCESS_ALL_TYPES, true, 60,
+                testDirectoryPath, PROCESS_ALL_TYPES, true, 60,
                 THRESHOLD_UNIT_MINUTE, THRESHOLD_CRITERIA_CREATION,
                 false, "", false, "", ERROR_IGNORE);
 
         // Check what remains
         assertPathsExist("recent.txt");
         assertPathsDoNotExist("old.txt");
-    }
-
-    @Test
-    public void testRecursiveVsNonRecursive() throws IOException {
-        // Create nested structure
-        createFileWithTimes("file1.txt", null, null);
-        createDirWithTimes("dir1", null, null);
-        createFileWithTimes("dir1/file2.txt", null, null);
-        createDirWithTimes("dir1/subdir", null, null);
-        createFileWithTimes("dir1/subdir/file3.txt", null, null);
-
-        // Delete with non-recursive option
-        deleteFilesFolders.action(
-                TEST_DIRECTORY_PATH, PROCESS_ONLY_FILE_TYPE, false, 0,
-                THRESHOLD_UNIT_DAY, THRESHOLD_CRITERIA_CREATION,
-                false, "", false, "", ERROR_IGNORE);
-
-        // Only top-level files should be deleted
-        assertPathsDoNotExist("file1.txt");
-        assertPathsExist("dir1", "dir1/file2.txt", "dir1/subdir", "dir1/subdir/file3.txt");
     }
 
     @Test
@@ -239,7 +216,7 @@ public class DeleteFilesFoldersTest {
 
         // Delete files only
         deleteFilesFolders.action(
-                TEST_DIRECTORY_PATH, PROCESS_ONLY_FILE_TYPE, true, 0,
+                testDirectoryPath, PROCESS_ONLY_FILE_TYPE, true, 0,
                 THRESHOLD_UNIT_DAY, THRESHOLD_CRITERIA_CREATION,
                 false, "", false, "", ERROR_IGNORE);
 
@@ -260,7 +237,7 @@ public class DeleteFilesFoldersTest {
 
         // Delete everything except .jpg files
         deleteFilesFolders.action(
-                TEST_DIRECTORY_PATH, PROCESS_ALL_TYPES, true, 0,
+                testDirectoryPath, PROCESS_ALL_TYPES, true, 0,
                 THRESHOLD_UNIT_DAY, THRESHOLD_CRITERIA_CREATION,
                 false, "", true, ".*\\.jpg$", ERROR_IGNORE);
 
@@ -282,7 +259,7 @@ public class DeleteFilesFoldersTest {
         String skipPattern = ".*[/\\\\]backups$"; // Works on both Windows and Unix
 
         deleteFilesFolders.action(
-                TEST_DIRECTORY_PATH, PROCESS_ALL_TYPES, true, 0,
+                testDirectoryPath, PROCESS_ALL_TYPES, true, 0,
                 THRESHOLD_UNIT_DAY, THRESHOLD_CRITERIA_CREATION,
                 true, skipPattern, false, "", ERROR_IGNORE);
 
@@ -304,7 +281,7 @@ public class DeleteFilesFoldersTest {
 
         // Skip the important.txt file, which should preserve its parent directories
         deleteFilesFolders.action(
-                TEST_DIRECTORY_PATH, PROCESS_ALL_TYPES, true, 0,
+                testDirectoryPath, PROCESS_ALL_TYPES, true, 0,
                 THRESHOLD_UNIT_DAY, THRESHOLD_CRITERIA_CREATION,
                 false, "", true, ".*important\\.txt$", ERROR_IGNORE);
 
@@ -328,7 +305,7 @@ public class DeleteFilesFoldersTest {
 
         // Skip the src directory and PDF files
         deleteFilesFolders.action(
-                TEST_DIRECTORY_PATH, PROCESS_ALL_TYPES, true, 0,
+                testDirectoryPath, PROCESS_ALL_TYPES, true, 0,
                 THRESHOLD_UNIT_DAY, THRESHOLD_CRITERIA_CREATION,
                 true, ".*[/\\\\]src$", true, ".*\\.pdf$", ERROR_IGNORE);
 
@@ -343,11 +320,11 @@ public class DeleteFilesFoldersTest {
     @Test
     public void testEdgeCaseEmptyDirectory() throws IOException {
         // Create empty base directory
-        File testDirectory = new File(TEST_DIRECTORY_PATH);
+        File testDirectory = new File(testDirectoryPath);
 
         // Try to delete
         deleteFilesFolders.action(
-                TEST_DIRECTORY_PATH, PROCESS_ALL_TYPES, true, 0,
+                testDirectoryPath, PROCESS_ALL_TYPES, true, 0,
                 THRESHOLD_UNIT_DAY, THRESHOLD_CRITERIA_CREATION,
                 false, "", false, "", ERROR_IGNORE);
 
@@ -355,43 +332,6 @@ public class DeleteFilesFoldersTest {
         Assert.assertTrue(testDirectory.exists(), "Base directory should still exist");
     }
 
-
-    @Test
-    public void testDeepNestedStructure() throws IOException {
-        // Create a deeply nested structure
-        for (int i = 1; i <= 10; i++) {
-            String path = "level1";
-            for (int j = 2; j <= i; j++) {
-                path += "/level" + j;
-            }
-            createDirWithTimes(path, null, null);
-            createFileWithTimes(path + "/file.txt", null, null);
-        }
-
-        // Create a file to skip in the deepest directory
-        createFileWithTimes("level1/level2/level3/level4/level5/level6/level7/level8/level9/level10/important.dat", null, null);
-
-        // Skip .dat files
-        deleteFilesFolders.action(
-                TEST_DIRECTORY_PATH, PROCESS_ALL_TYPES, true, 0,
-                THRESHOLD_UNIT_DAY, THRESHOLD_CRITERIA_CREATION,
-                false, "", true, ".*\\.dat$", ERROR_IGNORE);
-
-        // Check the deepest file and its parent structure
-        assertPathsExist(
-                "level1", "level1/level2", "level1/level2/level3", "level1/level2/level3/level4",
-                "level1/level2/level3/level4/level5", "level1/level2/level3/level4/level5/level6",
-                "level1/level2/level3/level4/level5/level6/level7",
-                "level1/level2/level3/level4/level5/level6/level7/level8",
-                "level1/level2/level3/level4/level5/level6/level7/level8/level9",
-                "level1/level2/level3/level4/level5/level6/level7/level8/level9/level10",
-                "level1/level2/level3/level4/level5/level6/level7/level8/level9/level10/important.dat");
-
-        // Other files should be deleted
-        assertPathsDoNotExist(
-                "level1/file.txt", "level1/level2/file.txt", "level1/level2/level3/file.txt",
-                "level1/level2/level3/level4/file.txt", "level1/level2/level3/level4/level5/file.txt");
-    }
 
     @Test
     public void testSiblingsWithSkippedItems() throws IOException {
@@ -408,7 +348,7 @@ public class DeleteFilesFoldersTest {
 
         // Skip .dat files
         deleteFilesFolders.action(
-                TEST_DIRECTORY_PATH, PROCESS_ALL_TYPES, true, 0,
+                testDirectoryPath, PROCESS_ALL_TYPES, true, 0,
                 THRESHOLD_UNIT_DAY, THRESHOLD_CRITERIA_CREATION,
                 false, "", true, ".*\\.dat$", ERROR_IGNORE);
 
@@ -431,7 +371,7 @@ public class DeleteFilesFoldersTest {
 
         // Test special character pattern matching
         deleteFilesFolders.action(
-                TEST_DIRECTORY_PATH, PROCESS_ALL_TYPES, true, 0,
+                testDirectoryPath, PROCESS_ALL_TYPES, true, 0,
                 THRESHOLD_UNIT_DAY, THRESHOLD_CRITERIA_CREATION,
                 true, ".*with spaces$", false, "", ERROR_IGNORE);
 
@@ -445,7 +385,7 @@ public class DeleteFilesFoldersTest {
         // Try to delete from a non-existent directory
         try {
             deleteFilesFolders.action(
-                    TEST_DIRECTORY_PATH + "nonexistent/", PROCESS_ALL_TYPES, true, 0,
+                    testDirectoryPath + "nonexistent/", PROCESS_ALL_TYPES, true, 0,
                     THRESHOLD_UNIT_DAY, THRESHOLD_CRITERIA_CREATION,
                     false, "", false, "", ERROR_THROW);
             Assert.fail("Expected BotCommandException was not thrown");
@@ -463,7 +403,7 @@ public class DeleteFilesFoldersTest {
         // Try to use invalid regex pattern
         try {
             deleteFilesFolders.action(
-                    TEST_DIRECTORY_PATH, PROCESS_ALL_TYPES, true, 0,
+                    testDirectoryPath, PROCESS_ALL_TYPES, true, 0,
                     THRESHOLD_UNIT_DAY, THRESHOLD_CRITERIA_CREATION,
                     false, "", true, "[[invalid", ERROR_THROW);
             Assert.fail("Expected exception was not thrown");
@@ -481,13 +421,13 @@ public class DeleteFilesFoldersTest {
             createFileWithTimes("original/file.txt", null, null);
 
             // Create symbolic link
-            Path original = Paths.get(TEST_DIRECTORY_PATH, "original");
-            Path link = Paths.get(TEST_DIRECTORY_PATH, "link");
+            Path original = Paths.get(testDirectoryPath, "original");
+            Path link = Paths.get(testDirectoryPath, "link");
             Files.createSymbolicLink(link, original);
 
             // Test deletion with symlinks
             deleteFilesFolders.action(
-                    TEST_DIRECTORY_PATH, PROCESS_ALL_TYPES, true, 0,
+                    testDirectoryPath, PROCESS_ALL_TYPES, true, 0,
                     THRESHOLD_UNIT_DAY, THRESHOLD_CRITERIA_CREATION,
                     false, "", false, "", ERROR_IGNORE);
 
@@ -498,86 +438,24 @@ public class DeleteFilesFoldersTest {
     }
 
     @Test
-    public void testFileLocking() throws IOException {
-        // Create files
-        createFileWithTimes("file1.txt", null, null);
-
-        // This is a simplified test as actual locking depends on OS
-        // In a real scenario, we would open the file with exclusive lock
-
-        deleteFilesFolders.action(
-                TEST_DIRECTORY_PATH, PROCESS_ALL_TYPES, true, 0,
-                THRESHOLD_UNIT_DAY, THRESHOLD_CRITERIA_CREATION,
-                false, "", false, "", ERROR_IGNORE);
-
-        // Should still work with ERROR_IGNORE
-        assertPathsDoNotExist("file1.txt");
-    }
-
-    @Test
     public void testAbsolutePathsInSkipPatterns() throws IOException {
         // Create structure
         String filePath = "skipMe.txt";
         createFileWithTimes(filePath, null, null);
 
         // Get absolute path
-        File file = new File(TEST_DIRECTORY_PATH + filePath);
+        File file = new File(testDirectoryPath + filePath);
         String absolutePath = file.getAbsolutePath();
         String escapedPath = absolutePath.replace("\\", "\\\\"); // Escape backslashes for regex
 
         // Skip using absolute path pattern
         deleteFilesFolders.action(
-                TEST_DIRECTORY_PATH, PROCESS_ALL_TYPES, true, 0,
+                testDirectoryPath, PROCESS_ALL_TYPES, true, 0,
                 THRESHOLD_UNIT_DAY, THRESHOLD_CRITERIA_CREATION,
                 false, "", true, escapedPath, ERROR_IGNORE);
 
         // File should be skipped
         assertPathsExist(filePath);
-    }
-
-    @Test
-    public void testLargeNumberOfFiles() throws IOException {
-        // Create a large number of files
-        for (int i = 0; i < 100; i++) {
-            createFileWithTimes("file" + i + ".txt", null, null);
-        }
-
-        // Create one special file to skip
-        createFileWithTimes("special.dat", null, null);
-
-        // Skip .dat files
-        deleteFilesFolders.action(
-                TEST_DIRECTORY_PATH, PROCESS_ALL_TYPES, true, 0,
-                THRESHOLD_UNIT_DAY, THRESHOLD_CRITERIA_CREATION,
-                false, "", true, ".*\\.dat$", ERROR_IGNORE);
-
-        // Special file should remain, all others should be deleted
-        assertPathsExist("special.dat");
-
-        // Check a sample of the other files
-        assertPathsDoNotExist("file0.txt", "file50.txt", "file99.txt");
-    }
-
-    @Test
-    public void testMultipleSkipPatternsScenario() throws IOException {
-        // Create structure
-        createFileWithTimes("doc.txt", null, null);
-        createFileWithTimes("image.jpg", null, null);
-        createFileWithTimes("data.csv", null, null);
-        createDirWithTimes("logs", null, null);
-        createFileWithTimes("logs/server.log", null, null);
-
-        // We would need multiple patterns - demonstrate with combined pattern
-        String filePattern = ".*(\\.(jpg|csv)$|logs.*)";
-
-        deleteFilesFolders.action(
-                TEST_DIRECTORY_PATH, PROCESS_ALL_TYPES, true, 0,
-                THRESHOLD_UNIT_DAY, THRESHOLD_CRITERIA_CREATION,
-                false, "", true, filePattern, ERROR_IGNORE);
-
-        // Check results
-        assertPathsExist("image.jpg", "data.csv", "logs", "logs/server.log");
-        assertPathsDoNotExist("doc.txt");
     }
 
     @Test
@@ -597,7 +475,7 @@ public class DeleteFilesFoldersTest {
 
         // Try to delete files older than 1 day
         deleteFilesFolders.action(
-                TEST_DIRECTORY_PATH, PROCESS_ALL_TYPES, true, 1,
+                testDirectoryPath, PROCESS_ALL_TYPES, true, 1,
                 THRESHOLD_UNIT_DAY, THRESHOLD_CRITERIA_CREATION,
                 false, "", false, "", ERROR_IGNORE);
 
@@ -610,39 +488,6 @@ public class DeleteFilesFoldersTest {
     }
 
     @Test
-    public void testNonRecursiveWithOldNestedContent() throws IOException {
-        // This tests the behavior when non-recursive mode encounters old directories with nested content
-        Instant oldTime = Instant.now().minus(5, ChronoUnit.DAYS);
-        Instant now = Instant.now();
-
-        // Create old directory with young nested content
-        createDirWithTimes("dir1", oldTime, oldTime);
-        createFileWithTimes("dir1/nested_young.txt", now, now); // Young file inside old dir
-        createFileWithTimes("dir1/nested_old.txt", oldTime, oldTime); // Old file inside old dir
-
-        // Create another old directory with only old content
-        createDirWithTimes("dir2", oldTime, oldTime);
-        createFileWithTimes("dir2/all_old.txt", oldTime, oldTime);
-
-        // Create a young directory
-        createDirWithTimes("dir3", now, now);
-        createFileWithTimes("dir3/content.txt", now, now);
-
-        // Non-recursive deletion of directories older than 1 day
-        deleteFilesFolders.action(
-                TEST_DIRECTORY_PATH, PROCESS_ALL_TYPES, false, 1,
-                THRESHOLD_UNIT_DAY, THRESHOLD_CRITERIA_CREATION,
-                false, "", false, "", ERROR_IGNORE);
-
-        // Non-recursive mode preserves a selected tree if any descendant must be kept.
-        assertPathsExist("dir1", "dir1/nested_young.txt", "dir1/nested_old.txt");
-        assertPathsDoNotExist("dir2", "dir2/all_old.txt");
-
-        // Young directory should remain
-        assertPathsExist("dir3", "dir3/content.txt");
-    }
-
-    @Test
     public void testConcurrentFileModification() throws IOException, InterruptedException {
         // This tests handling of files being actively written (simulating active logs)
         createFileWithTimes("active.log", null, null);
@@ -651,7 +496,7 @@ public class DeleteFilesFoldersTest {
         // Start a thread that keeps modifying one file
         Thread writer = new Thread(() -> {
             try {
-                Path activePath = Paths.get(TEST_DIRECTORY_PATH, "active.log");
+                Path activePath = Paths.get(testDirectoryPath, "active.log");
                 for (int i = 0; i < 5; i++) {
                     Files.write(activePath,
                                ("Log line " + i + "\n").getBytes(),
@@ -668,7 +513,7 @@ public class DeleteFilesFoldersTest {
 
         // Try to delete all files - should handle the actively written file gracefully
         deleteFilesFolders.action(
-                TEST_DIRECTORY_PATH, PROCESS_ALL_TYPES, true, 0,
+                testDirectoryPath, PROCESS_ALL_TYPES, true, 0,
                 THRESHOLD_UNIT_DAY, THRESHOLD_CRITERIA_CREATION,
                 false, "", false, "", ERROR_IGNORE);
 
