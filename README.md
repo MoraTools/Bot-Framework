@@ -1,6 +1,6 @@
 # A360 Bot Framework Package
 
-**Version 5.3.0** - maintained by **jamir-boop**, forked from the original A360 Tools package.
+**Version 5.3.1** - maintained by **jamir-boop**, forked from the original A360 Tools package.
 
 ## 5.x changes
 

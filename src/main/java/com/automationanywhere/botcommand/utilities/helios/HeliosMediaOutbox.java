@@ -318,7 +318,7 @@ public final class HeliosMediaOutbox {
                     } catch (IOException | RuntimeException damaged) {
                         if (!damagedManifestWarned) {
                             damagedManifestWarned = true;
-                            warning.accept("A media record could not be read. It is retained; other media delivery continues.");
+                            warning.accept("A media record could not be processed (" + errorType(damaged) + "). It is retained; other media delivery continues.");
                         }
                     }
                 }
@@ -339,10 +339,15 @@ public final class HeliosMediaOutbox {
         catch (IOException | RuntimeException damaged) {
             if (!damagedManifestWarned) {
                 damagedManifestWarned = true;
-                warning.accept("A media record could not be read. It is retained; JSON and other media delivery continue.");
+                warning.accept("A media record could not be read (" + errorType(damaged) + "). It is retained; JSON and other media delivery continue.");
             }
             return null;
         }
+    }
+
+    // Class names only: messages can hold paths or request data, and the ingest key must never appear in a warning.
+    private static String errorType(Exception error) {
+        return error.getClass().getName() + (error.getCause() == null ? "" : " caused by " + error.getCause().getClass().getName());
     }
 
     private void cleanupLocks() throws IOException {
@@ -403,7 +408,8 @@ public final class HeliosMediaOutbox {
                 .timeout(Duration.ofSeconds(10)).header(HeliosSink.KEY_HEADER, config.ingestKey);
         if (upload) {
             request.header("Content-Type", "video".equals(kind) ? "video/mp4" : "image/png").header("X-Helios-Media-SHA256", job.getString("sha256"))
-                    .PUT(HttpRequest.BodyPublishers.ofFile(bytesPath(manifest)));
+                    // Helios may answer before it reads the body, and Windows cannot delete a file the JDK still holds open.
+                    .PUT(HttpRequest.BodyPublishers.ofByteArray(Files.readAllBytes(bytesPath(manifest))));
         } else request.header("Content-Type", "application/json")
                 .PUT(HttpRequest.BodyPublishers.ofString(declaration(job).toString()));
         HttpResponse<String> response;

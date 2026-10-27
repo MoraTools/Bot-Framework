@@ -317,6 +317,71 @@ public class HeliosMediaTest {
         }
     }
 
+    @Test public void storedVideoLeftByAClosedSessionIsRemovedWhenHeliosAnswersBeforeTheBody() throws Exception {
+        try (EarlyReceiptServer server = new EarlyReceiptServer()) {
+            Path root = temp.create("helios-early-receipt");
+            HeliosConfig config = new HeliosConfig(server.url(), "test-key", "activity", "bot", "", "", "machine", "user", null);
+            java.lang.reflect.Constructor<CaptureResult> constructor = CaptureResult.class.getDeclaredConstructor(
+                    String.class, Path.class, Path.class, String.class);
+            constructor.setAccessible(true);
+            Path clip = root.resolve("clip.mp4");
+            CaptureResult capture = constructor.newInstance("closed-capture", clip, null, null);
+            HeliosMediaOutbox closed = new HeliosMediaOutbox(root, root.resolve("partition"), "closed", "closed-journal", config,
+                    HttpClient.newHttpClient(), ignored -> { });
+            try {
+                closed.register(1, new ErrorMedia(png(root), null, capture, true));
+                closed.session("closed-journal", SESSION_ID, caps());
+                closed.acknowledge("closed-journal", 0, 2);
+                closed.finishJSON();
+            } finally { closed.stop(); }
+            Files.write(clip, new byte[7 * 1024 * 1024]);
+            capture.completion.complete(clip);
+            Path video = root.resolve("media/partition/closed-1-video.json");
+            Path ready = video.resolveSibling(video.getFileName() + ".ready");
+            JSONObject staged = new JSONObject(Files.readString(video));
+            Assert.assertTrue(staged.getBoolean("confirmed"));
+            Assert.assertEquals(staged.getString("state"), "pending");
+            Assert.assertTrue(staged.has("sha256"));
+            Assert.assertTrue(Files.exists(ready));
+            List<String> warnings = java.util.Collections.synchronizedList(new ArrayList<>());
+            HeliosMediaOutbox next = new HeliosMediaOutbox(root, root.resolve("partition"), "next", "next-journal", config,
+                    HttpClient.newHttpClient(), warnings::add);
+            try {
+                await(() -> countJobsQuiet(root) == 0);
+                Assert.assertEquals(warnings, List.of());
+                Path descriptors = Path.of("/proc/self/fd");
+                if (Files.isDirectory(descriptors)) {
+                    try (Stream<Path> fds = Files.list(descriptors)) {
+                        for (Path fd : (Iterable<Path>) fds::iterator) {
+                            String target;
+                            try { target = Files.readSymbolicLink(fd).toString(); }
+                            catch (java.io.IOException vanished) { continue; }
+                            Assert.assertFalse(target.startsWith(ready.toString()), "the uploaded file is still open: " + target);
+                        }
+                    }
+                }
+            } finally { next.stop(); }
+        }
+    }
+
+    @Test public void sendLoopWarningNamesTheErrorClassWithoutTheIngestKey() throws Exception {
+        try (HeliosStubServer server = HeliosStubServer.withMedia()) {
+            Path root = temp.create("helios-media-warning");
+            Files.createDirectories(root.resolve("media/partition"));
+            Files.writeString(root.resolve("media/partition/damaged.json"), "{torn");
+            List<String> warnings = java.util.Collections.synchronizedList(new ArrayList<>());
+            HeliosMediaOutbox media = new HeliosMediaOutbox(root, root.resolve("partition"), "logger", "journal",
+                    server.config("activity"), HttpClient.newHttpClient(), warnings::add);
+            try {
+                await(() -> warnings.size() == 1);
+                String warning = warnings.get(0);
+                Assert.assertTrue(warning.startsWith("A media record could not be processed"), warning);
+                Assert.assertTrue(warning.contains("org.json.JSONException"), warning);
+                Assert.assertFalse(warning.contains("test-key"), warning);
+            } finally { media.stop(); }
+        }
+    }
+
     @Test public void terminalReceiptsNeedIdentityAndAvailableContentMustMatch() {
         JSONObject job = job("pending");
         Assert.assertTrue(HeliosMediaOutbox.validReceipt(job, receipt(job, "unavailable").put("reason", "storageBudget"), true));
@@ -324,6 +389,54 @@ public class HeliosMediaTest {
         Assert.assertTrue(HeliosMediaOutbox.validReceipt(job, receipt(job, "evicted"), true));
         Assert.assertFalse(HeliosMediaOutbox.validReceipt(job, receipt(job, "available").put("sha256", "b".repeat(64)).put("bytes", 9), true));
         Assert.assertFalse(HeliosMediaOutbox.validReceipt(job, receipt(job, "expired").put("ordinal", 1), true));
+    }
+
+    /** Answers each upload from the request head, waits, and closes without reading the body, like Helios for stored media. */
+    private static final class EarlyReceiptServer implements AutoCloseable {
+        private final java.net.ServerSocket server = new java.net.ServerSocket(0, 50, java.net.InetAddress.getLoopbackAddress());
+
+        EarlyReceiptServer() throws java.io.IOException {
+            Thread accept = new Thread(() -> {
+                while (!server.isClosed()) {
+                    try (java.net.Socket socket = server.accept()) { answer(socket); }
+                    catch (Exception closed) { /* the server or the client closed */ }
+                }
+            });
+            accept.setDaemon(true);
+            accept.start();
+        }
+
+        String url() { return "http://127.0.0.1:" + server.getLocalPort(); }
+
+        private static void answer(java.net.Socket socket) throws java.io.IOException, InterruptedException {
+            java.io.InputStream in = socket.getInputStream();
+            java.io.ByteArrayOutputStream head = new java.io.ByteArrayOutputStream();
+            while (!head.toString(java.nio.charset.StandardCharsets.ISO_8859_1).endsWith("\r\n\r\n")) {
+                int next = in.read();
+                if (next < 0) return;
+                head.write(next);
+            }
+            String[] lines = head.toString(java.nio.charset.StandardCharsets.ISO_8859_1).split("\r\n");
+            String[] parts = lines[0].split(" ")[1].split("/");
+            java.util.Map<String, String> headers = new java.util.HashMap<>();
+            for (int i = 1; i < lines.length; i++) {
+                int colon = lines[i].indexOf(':');
+                if (colon > 0) headers.put(lines[i].substring(0, colon).trim().toLowerCase(), lines[i].substring(colon + 1).trim());
+            }
+            byte[] body = new JSONObject().put("sessionId", parts[4]).put("ordinal", Integer.parseInt(parts[6])).put("kind", parts[8])
+                    .put("state", "available").put("sha256", headers.get("x-helios-media-sha256"))
+                    .put("bytes", Long.parseLong(headers.get("content-length")))
+                    .put("expiresAtUtc", Instant.now().plusSeconds(86400).toString()).toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            java.io.OutputStream out = socket.getOutputStream();
+            out.write(("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + body.length + "\r\n\r\n")
+                    .getBytes(java.nio.charset.StandardCharsets.ISO_8859_1));
+            out.write(body);
+            out.flush();
+            // Closing at once resets the connection over the unread body, and on Windows the reset can discard the receipt.
+            Thread.sleep(300);
+        }
+
+        @Override public void close() throws java.io.IOException { server.close(); }
     }
 
     private static JSONObject caps() { return HeliosStubServer.mediaCapability(); }
