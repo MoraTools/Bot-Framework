@@ -9,6 +9,7 @@ import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
+import java.io.File;
 import java.util.Map;
 
 /**
@@ -106,7 +107,8 @@ public class XMLReaderTest {
                 null,
                 false
         ));
-        Assert.assertTrue(e.getMessage().contains(INVALID_FILE_PATH), e.getMessage());
+        // The product reads new File(path), so the message shows the platform separators.
+        Assert.assertTrue(e.getMessage().contains(new File(INVALID_FILE_PATH).getPath()), e.getMessage());
     }
 
 }

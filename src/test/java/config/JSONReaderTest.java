@@ -13,6 +13,7 @@ import org.testng.Assert;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -238,7 +239,8 @@ public class JSONReaderTest {
         String missing = "invalid/path/to/missing.json";
         BotCommandException e = Assert.expectThrows(BotCommandException.class,
                 () -> jsonReader.action("FILE", missing, CHARSET_UTF_8, null, "ALL", null, false));
-        Assert.assertTrue(e.getMessage().contains(missing), e.getMessage());
+        // The product reads Path.of(missing), so the message shows the platform separators.
+        Assert.assertTrue(e.getMessage().contains(Path.of(missing).toString()), e.getMessage());
     }
 
     @Test(expectedExceptions = BotCommandException.class)

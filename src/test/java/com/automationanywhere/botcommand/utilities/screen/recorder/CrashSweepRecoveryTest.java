@@ -9,6 +9,7 @@ import org.testng.annotations.BeforeClass;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 import screen.process.DesktopAvailability;
+import support.ChildJvm;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -43,6 +44,8 @@ public class CrashSweepRecoveryTest {
     private Path logDir;
     private Path seedSegmentsDir;
     private Path ffmpegExe;
+    /** Exited owner whose PID goes into session.meta; held so Windows cannot reuse the PID. */
+    private Process deadOwner;
 
     @BeforeClass
     public void requireDesktop() {
@@ -296,7 +299,7 @@ public class CrashSweepRecoveryTest {
     }
 
     private void writeSessionMeta(Path sessionFolder, String sessionId, EncodingMode mode)
-            throws IOException {
+            throws IOException, InterruptedException {
         writeSessionMetaWithLogDir(sessionFolder, sessionId, logDir, mode);
     }
 
@@ -305,21 +308,23 @@ public class CrashSweepRecoveryTest {
      * of whether that directory exists, so tests can exercise the
      * "logDir disappeared" fallback path.
      *
-     * <p>The persisted {@code jvmPid} is deliberately set to a value other
-     * than the current JVM's so the sweep treats the folder as a crashed
-     * prior session (the scenario under test) rather than as a live
-     * same-JVM session it should leave alone.
+     * <p>The persisted {@code jvmPid} is deliberately the PID of a child
+     * process that has already exited, so the sweep treats the folder as a
+     * crashed prior session (the scenario under test) rather than as a live
+     * session it should leave alone. {@code current pid + 1} is not dead on
+     * Windows, which ignores the two low PID bits and resolves it to this JVM.
      */
     private void writeSessionMetaWithLogDir(Path sessionFolder, String sessionId,
                                             Path metaLogDir, EncodingMode mode)
-            throws IOException {
+            throws IOException, InterruptedException {
+        if (deadOwner == null) deadOwner = ChildJvm.exited();
         Files.createDirectories(sessionFolder);
         JSONObject json = new JSONObject();
         json.put("sessionId", sessionId);
         json.put("logDir", metaLogDir.toAbsolutePath().toString());
         json.put("bufferSeconds", 5);
         json.put("startedAt", Instant.now().toString());
-        json.put("jvmPid", ProcessHandle.current().pid() + 1L);
+        json.put("jvmPid", deadOwner.pid());
         json.put("encodingMode", mode.name());
         Files.write(sessionFolder.resolve("session.meta"),
                 json.toString(2).getBytes(StandardCharsets.UTF_8));
