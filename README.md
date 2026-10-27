@@ -1,6 +1,6 @@
 # A360 Bot Framework Package
 
-**Version 5.3.1** - maintained by **jamir-boop**, forked from the original A360 Tools package.
+**Version 5.3.2** - maintained by **jamir-boop**, forked from the original A360 Tools package.
 
 ## 5.x changes
 
@@ -171,7 +171,7 @@ A delivery delay emits one local `WARN` per logger session. Each distinct termin
 
 `Stop Logger Session` saves the expected entry count and waits up to 5 seconds for delivery, plus up to 1 second to stop the sender. A refused session ends the delivery wait early when no older journals remain to replay. HTTP rejections such as 400/401/403/404 refuse delivery, and so does a start reply that does not confirm separate logger streams. A start reply without a valid `sessionId`, and an end reply that is not a valid Helios receipt (including an empty reply), are retried, not treated as a refusal.
 
-Helios verifies the complete sequence before confirming delivery. A missing entry triggers one full repair pass; duplicate ordinals are ignored. If the sequence is still incomplete, the journal is retained and recovery moves on to other sessions. The journal is deleted only after an explicit verified receipt. If deletion fails, the verified end still counts as delivered, the journal stays on disk, and one local warning is written. Pending journals retry at a later logger startup under the same operating-system user, Helios URL and ingest key. A crash without a closing record permits replay of saved entries, but cannot prove that the complete session was captured. Complete records before a damaged or truncated tail are sent; the journal stays unverified and is retained for inspection.
+Helios verifies the complete sequence before confirming delivery. A missing entry triggers one full repair pass; duplicate ordinals are ignored. If the sequence is still incomplete, the journal is retained and recovery moves on to other sessions. The journal is deleted only after an explicit verified receipt. If deletion fails, the verified end still counts as delivered, the journal stays on disk, and one local warning is written. Pending journals retry at a later logger startup under the same operating-system user, Helios URL and ingest key. A crash without a closing record permits replay of saved entries, but cannot prove that the complete session was captured. Complete records before a damaged or truncated tail are sent. A journal without a closing record, or with a damaged tail, is renamed to `<name>.helios-journal.unverified` after Helios has stored all its complete records one time. It is kept for inspection and not sent again.
 
 Journals live in `<user.home>/.helios/outbox/`, separate from HTML retention. They contain log data, including logged variable values, but no ingest keys. A journal retains all entries until final verification, including entries already acknowledged during the run. Key changes use a separate directory; pending journals under an old key need operator attention.
 
@@ -243,7 +243,8 @@ Media upload starts after a verified ERROR row receipt. It uses the AA proxy sel
 A verified media receipt is required before an upload copy is deleted. Media state survives JSON `/end` and verified
 JSON journal deletion. Any later Helios logger startup with the same URL/key can retry saved media, including a new
 session with No video selected or ERROR recording unchecked. Media retry does not recreate a deleted parent row. Close leaves the file sender
-active while the recorder drains, then stops it with an additional wait of at most one second. Delivery after JVM
+active while the recorder drains. It then waits up to 30 seconds for the ERROR media of this session whose rows Helios
+stored, and stops the sender with an additional wait of at most one second. Delivery after JVM
 exit is not guaranteed.
 
 New sessions reuse the requested local recorder and clips. Local recording with Helios disabled needs no media

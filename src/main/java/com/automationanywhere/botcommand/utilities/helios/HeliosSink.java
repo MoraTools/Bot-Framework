@@ -100,7 +100,11 @@ public final class HeliosSink {
         return media.register(ordinal, request);
     }
 
-    public void stopMedia() { if (media != null) media.stop(); }
+    public void stopMedia() {
+        if (media == null) return;
+        media.awaitSessionMedia();
+        media.stop();
+    }
 
     /** Persist the expected count before waiting. A timeout never removes the journal. */
     public boolean finish(String status, int expectedEntries) throws IOException {
@@ -141,6 +145,12 @@ public final class HeliosSink {
                 // Replay at most one older batch per turn so the current session gets a turn too.
                 if (previous != null && (previous.step(true) || previous.refused)) {
                     previous.journal.close();
+                    // Closed first: Windows cannot rename an open file. A failed rename retries at the next start.
+                    if (previous.unverified) {
+                        Path path = previous.journal.path;
+                        try { Files.move(path, path.resolveSibling(path.getFileName() + ".unverified")); }
+                        catch (IOException retained) { /* kept, or already renamed by another sender */ }
+                    }
                     previous = null;
                 }
                 if ((delivered || closing && current.refused) && previous == null && recovery.isEmpty()) break;
@@ -164,6 +174,9 @@ public final class HeliosSink {
         int failures;
         boolean refused;
         boolean replayed;
+        boolean skipped;
+        /** An older journal that can never be verified, after Helios stored all its complete records once. */
+        boolean unverified;
         int batchEntries = HeliosJournal.BATCH_ENTRIES;
         JSONObject pending;
 
@@ -202,6 +215,7 @@ public final class HeliosSink {
                 if (body == null) {
                     // No closing record means a previous run crashed. Upload its available rows,
                     // but never invent a verified close for that run.
+                    unverified = flush && journal != HeliosSink.this.journal && !skipped;
                     return flush && journal != HeliosSink.this.journal;
                 }
                 String path = "/api/ingest/sessions/" + sessionId;
@@ -252,6 +266,7 @@ public final class HeliosSink {
                     } else {
                         // Advance delivery only: keep the rejected record in the journal for later recovery.
                         journal.acknowledge(pending.getLong("journalOffset"));
+                        skipped = true;
                         batchEntries = HeliosJournal.BATCH_ENTRIES;
                         warning.accept("An oversized entry was retained on disk. Later entries will still be sent.");
                     }
@@ -277,6 +292,7 @@ public final class HeliosSink {
                 delay(error.retryMillis);
             } catch (InvalidObjectException corrupt) {
                 refused = true;
+                unverified = journal != HeliosSink.this.journal && !skipped;
                 warning.accept("A damaged journal was retained after sending its complete records.");
             } catch (IOException | RuntimeException error) {
                 delay(0);

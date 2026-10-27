@@ -33,6 +33,7 @@ public final class HeliosMediaOutbox {
     static final long MAX_BYTES = 256L * 1024 * 1024;
     static final long SCREENSHOT_BYTES = 1024L * 1024;
     static final long VIDEO_BYTES = 8L * 1024 * 1024;
+    static final long END_WAIT_MILLIS = 30_000;
     private static final Object ROOT_MUTEX = new Object();
     private static final java.util.concurrent.Semaphore FILE_TRANSFER = new java.util.concurrent.Semaphore(1);
     private final Path root;
@@ -146,6 +147,24 @@ public final class HeliosMediaOutbox {
             }
             return null;
         });
+    }
+
+    void awaitSessionMedia() { awaitSessionMedia(END_WAIT_MILLIS); }
+
+    /** The running worker keeps sending; this returns when no job of this logger is sendable before the deadline. */
+    void awaitSessionMedia(long millis) {
+        long deadline = System.currentTimeMillis() + millis;
+        try {
+            while (System.currentTimeMillis() < deadline && worker.isAlive() && locked(root, () -> {
+                for (Path path : jobs(directory)) {
+                    if (!path.getFileName().toString().startsWith(loggerId + "-")) continue;
+                    JSONObject job = readQuiet(path);
+                    if (loggerId.equals(job.optString("loggerSessionId")) && sendable(job, deadline)) return true;
+                }
+                return false;
+            })) Thread.sleep(100);
+        } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+        catch (IOException unavailable) { /* stop() follows; saved media retries at a later logger start */ }
     }
 
     void stop() {
@@ -382,15 +401,12 @@ public final class HeliosMediaOutbox {
         JSONObject job = locked(root, () -> {
             if (!Files.exists(manifest)) return null;
             JSONObject value = read(manifest);
-            if (value.optLong("retryAt") > System.currentTimeMillis()) return null;
             stage(value, manifest);
             cleanupOwnedSource(value);
             return value;
         });
-        if (job == null || !job.optBoolean("confirmed") || !job.has("sessionId")) return;
+        if (job == null || !sendable(job, System.currentTimeMillis())) return;
         JSONObject caps = capability != null ? capability : job.optJSONObject("capability");
-        // Wait for a session start of this logger to bring the limits.
-        if (!validCapability(caps)) return;
         String kind = job.getString("kind");
         long maximum = caps.getLong("video".equals(kind) ? "maxVideoBytes" : "maxScreenshotBytes");
         if (job.has("bytes") && job.getLong("bytes") > maximum) {
@@ -403,7 +419,6 @@ public final class HeliosMediaOutbox {
         }
         String path = "/api/ingest/sessions/" + job.getString("sessionId") + "/entries/" + job.getInt("ordinal") + "/media";
         boolean upload = "pending".equals(job.getString("state")) && job.has("sha256");
-        if ("pending".equals(job.getString("state")) && !upload) return;
         HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(config.baseUrl + path + (upload ? "/" + kind : "")))
                 .timeout(Duration.ofSeconds(10)).header(HeliosSink.KEY_HEADER, config.ingestKey);
         if (upload) {
@@ -496,6 +511,14 @@ public final class HeliosMediaOutbox {
             save(manifest, current);
             return null;
         });
+    }
+
+    /** True when the worker would send a request for this job at time {@code at}. */
+    private boolean sendable(JSONObject job, long at) {
+        // Without limits, wait for a session start of this logger to bring them.
+        return job.optBoolean("confirmed") && job.has("sessionId") && job.optLong("retryAt") <= at
+                && validCapability(capability != null ? capability : job.optJSONObject("capability"))
+                && (job.has("sha256") || !"pending".equals(job.optString("state")));
     }
 
     private static boolean validCapability(JSONObject value) {

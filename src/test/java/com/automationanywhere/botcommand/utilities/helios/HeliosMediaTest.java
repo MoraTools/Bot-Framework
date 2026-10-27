@@ -382,6 +382,82 @@ public class HeliosMediaTest {
         }
     }
 
+    @Test public void stopMediaDeliversThisLoggersConfirmedUploadBeforeItStops() throws Exception {
+        try (HeliosStubServer server = HeliosStubServer.withMedia()) {
+            java.util.concurrent.atomic.AtomicInteger attempts = new java.util.concurrent.atomic.AtomicInteger();
+            // The first upload fails at once, so the JSON close ends first; the retry is answered after 1.5 s.
+            server.respond(request -> {
+                if (!isUpload(request)) return null;
+                if (attempts.getAndIncrement() == 0) return HeliosStubServer.Reply.of(503, "");
+                Thread.sleep(1500);
+                return null;
+            });
+            Path root = temp.create("helios-media-end-wait");
+            HeliosSink sink = new HeliosSink(server.config("activity"), root, ignored -> { }, UUID.randomUUID().toString());
+            sink.registerMedia(0, new ErrorMedia(png(root), null, null, false));
+            sink.append(new JSONObject().put("firstOrdinal", 0).put("entries", new JSONArray().put(new JSONObject().put("message", "ERROR row"))));
+            Assert.assertTrue(sink.finish("ERROR", 1));
+            sink.stopMedia();
+            Assert.assertEquals(attempts.get(), 2);
+            Assert.assertEquals(countJobs(root), 0, "the upload of this logger completed before the stop");
+            try (Stream<Path> files = Files.walk(root.resolve("media"))) {
+                Assert.assertTrue(files.noneMatch(path -> path.toString().endsWith(".ready")));
+            }
+        }
+    }
+
+    @Test public void endWaitSkipsUnconfirmedMediaAndOtherLoggers() throws Exception {
+        try (HeliosStubServer server = HeliosStubServer.withMedia()) {
+            CountDownLatch release = new CountDownLatch(1);
+            server.respond(request -> {
+                if (isUpload(request)) release.await(5, TimeUnit.SECONDS);
+                return null;
+            });
+            Path root = temp.create("helios-media-end-skip");
+            HeliosMediaOutbox other = outbox(server, root, "other", "other-journal");
+            other.stop();
+            other.register(0, new ErrorMedia(png(root), null, null, false));
+            other.session("other-journal", SESSION_ID, caps());
+            other.acknowledge("other-journal", 0, 1);
+            HeliosMediaOutbox media = outbox(server, root, "logger", "journal");
+            try {
+                media.register(0, new ErrorMedia(png(root), null, null, false));
+                media.session("journal", SESSION_ID, caps());
+                // The worker is busy with the confirmed job of the other logger.
+                await(() -> uploads(server).size() == 1);
+                long start = System.nanoTime();
+                media.awaitSessionMedia(10_000);
+                long millis = (System.nanoTime() - start) / 1_000_000;
+                Assert.assertTrue(millis < 1000, "the wait took " + millis + " ms");
+                Assert.assertEquals(countJobs(root), 2);
+            } finally { release.countDown(); media.stop(); }
+        }
+    }
+
+    @Test public void endWaitStopsAtItsCapWhenTheUploadKeepsFailing() throws Exception {
+        try (HeliosStubServer server = HeliosStubServer.withMedia()) {
+            CountDownLatch release = new CountDownLatch(1);
+            server.respond(request -> {
+                if (!isUpload(request)) return null;
+                release.await(5, TimeUnit.SECONDS);
+                return HeliosStubServer.Reply.of(503, "");
+            });
+            Path root = temp.create("helios-media-end-cap");
+            HeliosMediaOutbox media = outbox(server, root, "logger", "journal");
+            try {
+                media.register(0, new ErrorMedia(png(root), null, null, false));
+                media.session("journal", SESSION_ID, caps());
+                media.acknowledge("journal", 0, 1);
+                await(() -> uploads(server).size() == 1);
+                long start = System.nanoTime();
+                media.awaitSessionMedia(1500);
+                long millis = (System.nanoTime() - start) / 1_000_000;
+                Assert.assertTrue(millis >= 1400 && millis < 2500, "the wait took " + millis + " ms");
+                Assert.assertEquals(countJobs(root), 1);
+            } finally { release.countDown(); media.stop(); }
+        }
+    }
+
     @Test public void terminalReceiptsNeedIdentityAndAvailableContentMustMatch() {
         JSONObject job = job("pending");
         Assert.assertTrue(HeliosMediaOutbox.validReceipt(job, receipt(job, "unavailable").put("reason", "storageBudget"), true));

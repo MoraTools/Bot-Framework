@@ -205,7 +205,7 @@ public class HeliosDeliveryTest {
                 Assert.assertFalse(server.verified.contains("gap"));
                 Assert.assertFalse(server.verified.contains("torn"));
                 Assert.assertTrue(Files.exists(gap));
-                Assert.assertTrue(Files.exists(torn));
+                await(() -> !Files.exists(torn) && Files.exists(unverified(torn)));
                 // The server flag precedes response delivery and the client's durable receipt handoff.
                 await(() -> !Files.exists(healthy));
             } finally { Assert.assertTrue(sink.finish("OK", 0)); }
@@ -267,6 +267,66 @@ public class HeliosDeliveryTest {
         }
     }
 
+    @Test
+    public void crashedJournalIsSentOnceThenKeptAsUnverified() throws Exception {
+        try (HeliosStubServer server = new HeliosStubServer()) {
+            Path root = temp.create("helios-crashed-once");
+            Path crashed = seed(root, server.config("crashed"), "d", -1, false);
+            HeliosSink sink = sink(server.config("current"), root, ignored -> { });
+            try {
+                String id = UUID.nameUUIDFromBytes("crashed".getBytes(StandardCharsets.UTF_8)).toString();
+                await(() -> server.rows.containsKey(id + ":0"));
+                await(() -> !Files.exists(crashed) && Files.exists(unverified(crashed)));
+            } finally { Assert.assertTrue(sink.finish("OK", 0)); }
+            Assert.assertTrue(sink(server.config("later"), root, ignored -> { }).finish("OK", 0));
+            Assert.assertEquals(server.startAttempts.get("crashed").intValue(), 1, "a later start does not send it again");
+            Assert.assertTrue(server.requests("/end").stream().noneMatch(request -> request.path.contains(
+                    UUID.nameUUIDFromBytes("crashed".getBytes(StandardCharsets.UTF_8)).toString())));
+            Assert.assertTrue(Files.exists(unverified(crashed)));
+        }
+    }
+
+    @Test
+    public void crashedJournalWhoseEntriesHeliosRefusesKeepsItsName() throws Exception {
+        try (HeliosStubServer server = new HeliosStubServer()) {
+            server.reply("/entries", 503, "", "Retry-After", "60");
+            Path root = temp.create("helios-crashed-unsent");
+            Path crashed = seed(root, server.config("crashed"), "d", -1, false);
+            HeliosSink sink = sink(server.config("current"), root, ignored -> { });
+            try {
+                await(() -> server.requests("/entries").stream().anyMatch(request -> request.path.contains(
+                        UUID.nameUUIDFromBytes("crashed".getBytes(StandardCharsets.UTF_8)).toString())));
+            } finally { sink.finish("OK", 0); }
+            Assert.assertTrue(Files.exists(crashed));
+            Assert.assertFalse(Files.exists(unverified(crashed)));
+        }
+    }
+
+    @Test
+    public void crashedJournalWithAnOversizedEntryKeepsItsName() throws Exception {
+        try (HeliosStubServer server = new HeliosStubServer()) {
+            server.maxEntriesBytes = 256;
+            Path root = temp.create("helios-crashed-oversized");
+            Path crashed = seed(root, server.config("crashed"), "e", -1, false);
+            try (HeliosJournal journal = new HeliosJournal(crashed, null)) {
+                JSONObject large = entry(1);
+                large.getJSONArray("entries").getJSONObject(0).put("message", "x".repeat(1024));
+                journal.append(large);
+                journal.append(entry(2));
+            }
+            HeliosSink sink = sink(server.config("current"), root, ignored -> { });
+            String id = UUID.nameUUIDFromBytes("crashed".getBytes(StandardCharsets.UTF_8)).toString();
+            try {
+                await(() -> server.rows.containsKey(id + ":2"));
+            } finally { Assert.assertTrue(sink.finish("OK", 0)); }
+            Assert.assertFalse(server.rows.containsKey(id + ":1"));
+            Assert.assertTrue(Files.exists(crashed), "Helios did not store every record, so the journal keeps its name");
+            Assert.assertFalse(Files.exists(unverified(crashed)));
+        }
+    }
+
+    private static Path unverified(Path journal) { return journal.resolveSibling(journal.getFileName() + ".unverified"); }
+
     private static HeliosSink sink(HeliosConfig config, Path root, java.util.function.Consumer<String> warning) throws Exception {
         return new HeliosSink(config, root, warning, UUID.randomUUID().toString());
     }
@@ -280,7 +340,7 @@ public class HeliosDeliveryTest {
                 .put("loggerSessionId", UUID.randomUUID().toString()).put("sessionIdentity", true);
         try (HeliosJournal journal = new HeliosJournal(path, start)) {
             journal.append(entry(0));
-            if (!torn) journal.append(new JSONObject().put("status", "OK").put("expectedEntries", expected));
+            if (!torn && expected >= 0) journal.append(new JSONObject().put("status", "OK").put("expectedEntries", expected));
         }
         if (torn) Files.writeString(path, "{partial", java.nio.file.StandardOpenOption.APPEND);
         return path;
