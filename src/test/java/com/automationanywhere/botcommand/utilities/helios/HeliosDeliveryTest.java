@@ -204,7 +204,7 @@ public class HeliosDeliveryTest {
                 Assert.assertTrue(server.rows.containsKey(tornId + ":0"), "saved prefix must reach Helios");
                 Assert.assertFalse(server.verified.contains("gap"));
                 Assert.assertFalse(server.verified.contains("torn"));
-                Assert.assertTrue(Files.exists(gap));
+                await(() -> !Files.exists(gap) && Files.exists(unverified(gap)));
                 await(() -> !Files.exists(torn) && Files.exists(unverified(torn)));
                 // The server flag precedes response delivery and the client's durable receipt handoff.
                 await(() -> !Files.exists(healthy));
@@ -272,7 +272,8 @@ public class HeliosDeliveryTest {
         try (HeliosStubServer server = new HeliosStubServer()) {
             Path root = temp.create("helios-crashed-once");
             Path crashed = seed(root, server.config("crashed"), "d", -1, false);
-            HeliosSink sink = sink(server.config("current"), root, ignored -> { });
+            java.util.List<String> warnings = new CopyOnWriteArrayList<>();
+            HeliosSink sink = sink(server.config("current"), root, warnings::add);
             try {
                 String id = UUID.nameUUIDFromBytes("crashed".getBytes(StandardCharsets.UTF_8)).toString();
                 await(() -> server.rows.containsKey(id + ":0"));
@@ -283,6 +284,7 @@ public class HeliosDeliveryTest {
             Assert.assertTrue(server.requests("/end").stream().noneMatch(request -> request.path.contains(
                     UUID.nameUUIDFromBytes("crashed".getBytes(StandardCharsets.UTF_8)).toString())));
             Assert.assertTrue(Files.exists(unverified(crashed)));
+            Assert.assertFalse(warnings.stream().anyMatch(text -> text.contains("was renamed to")));
         }
     }
 
@@ -303,7 +305,7 @@ public class HeliosDeliveryTest {
     }
 
     @Test
-    public void crashedJournalWithAnOversizedEntryKeepsItsName() throws Exception {
+    public void crashedJournalWithAnOversizedEntryIsRenamedAfterItsOtherRecordsAreStored() throws Exception {
         try (HeliosStubServer server = new HeliosStubServer()) {
             server.maxEntriesBytes = 256;
             Path root = temp.create("helios-crashed-oversized");
@@ -314,15 +316,164 @@ public class HeliosDeliveryTest {
                 journal.append(large);
                 journal.append(entry(2));
             }
-            HeliosSink sink = sink(server.config("current"), root, ignored -> { });
+            java.util.List<String> warnings = new CopyOnWriteArrayList<>();
+            HeliosSink sink = sink(server.config("current"), root, warnings::add);
             String id = UUID.nameUUIDFromBytes("crashed".getBytes(StandardCharsets.UTF_8)).toString();
             try {
-                await(() -> server.rows.containsKey(id + ":2"));
-            } finally { Assert.assertTrue(sink.finish("OK", 0)); }
-            Assert.assertFalse(server.rows.containsKey(id + ":1"));
-            Assert.assertTrue(Files.exists(crashed), "Helios did not store every record, so the journal keeps its name");
-            Assert.assertFalse(Files.exists(unverified(crashed)));
+                await(() -> !Files.exists(crashed) && Files.exists(unverified(crashed)));
+                await(() -> warnings.stream().anyMatch(text -> text.contains("was renamed to")));
+                Assert.assertEquals(server.rows(id).keySet(), new java.util.TreeSet<>(java.util.List.of(0, 2)));
+                Assert.assertEquals(warnings.stream().filter(text -> text.contains("was renamed to")).collect(
+                        java.util.stream.Collectors.toList()), java.util.List.of(
+                        "An older Helios journal was renamed to e.helios-journal.unverified and kept for inspection because "
+                                + "an oversized entry was retained. It will not be sent again."));
+                Assert.assertTrue(server.requests("/end").stream().noneMatch(request -> request.path.contains(id)));
+            } finally { Assert.assertTrue(finishAndStop(sink, "OK", 0)); }
+            Assert.assertTrue(finishAndStop(sink(server.config("later"), root, ignored -> { }), "OK", 0));
+            Assert.assertEquals(server.startAttempts.get("crashed").intValue(), 1);
         }
+    }
+
+    @Test
+    public void tornJournalWithAnOversizedEntryIsRenamed() throws Exception {
+        try (HeliosStubServer server = new HeliosStubServer()) {
+            server.maxEntriesBytes = 256;
+            Path root = temp.create("helios-torn-oversized");
+            Path torn = seed(root, server.config("torn"), "e", -1, false);
+            try (HeliosJournal journal = new HeliosJournal(torn, null)) {
+                JSONObject large = entry(1);
+                large.getJSONArray("entries").getJSONObject(0).put("message", "x".repeat(1024));
+                journal.append(large);
+                journal.append(entry(2));
+            }
+            Files.writeString(torn, "{partial", java.nio.file.StandardOpenOption.APPEND);
+            java.util.List<String> warnings = new CopyOnWriteArrayList<>();
+            HeliosSink sink = sink(server.config("current"), root, warnings::add);
+            String id = UUID.nameUUIDFromBytes("torn".getBytes(StandardCharsets.UTF_8)).toString();
+            try {
+                await(() -> !Files.exists(torn) && Files.exists(unverified(torn)));
+                await(() -> warnings.stream().anyMatch(text -> text.contains("was renamed to")));
+                Assert.assertEquals(server.rows(id).keySet(), new java.util.TreeSet<>(java.util.List.of(0, 2)));
+                Assert.assertTrue(warnings.contains("A damaged journal was retained after sending its complete records."));
+                Assert.assertEquals(warnings.stream().filter(text -> text.contains("was renamed to")).collect(
+                        java.util.stream.Collectors.toList()), java.util.List.of(
+                        "An older Helios journal was renamed to e.helios-journal.unverified and kept for inspection because "
+                                + "an oversized entry was retained. It will not be sent again."));
+                Assert.assertTrue(server.requests("/end").stream().noneMatch(request -> request.path.contains(id)));
+            } finally { Assert.assertTrue(finishAndStop(sink, "OK", 0)); }
+            Assert.assertTrue(finishAndStop(sink(server.config("later"), root, ignored -> { }), "OK", 0));
+            Assert.assertEquals(server.startAttempts.get("torn").intValue(), 1);
+        }
+    }
+
+    @Test
+    public void recoveryJournalWithAnOversizedEntryIsRenamedAfterOneReplayPassAndNotSentAgain() throws Exception {
+        try (HeliosStubServer server = new HeliosStubServer()) {
+            server.maxEntriesBytes = 256;
+            Path root = temp.create("helios-recovery-oversized");
+            Path saved = seed(root, server.config("oversized"), "a", -1, false);
+            try (HeliosJournal journal = new HeliosJournal(saved, null)) {
+                JSONObject large = entry(1);
+                large.getJSONArray("entries").getJSONObject(0).put("message", "x".repeat(1024));
+                journal.append(large);
+                journal.append(entry(2));
+                journal.append(closing(3));
+            }
+            java.util.List<String> warnings = new CopyOnWriteArrayList<>();
+            HeliosSink sink = sink(server.config("current"), root, warnings::add);
+            String id = UUID.nameUUIDFromBytes("oversized".getBytes(StandardCharsets.UTF_8)).toString();
+            try {
+                await(() -> !Files.exists(saved) && Files.exists(unverified(saved)));
+                await(() -> warnings.stream().anyMatch(text -> text.contains("was renamed to")));
+                Assert.assertEquals(server.rows(id).keySet(), new java.util.TreeSet<>(java.util.List.of(0, 2)));
+                Assert.assertEquals(server.ends.get("oversized").intValue(), 2, "only one replay pass");
+                for (HeliosStubServer.Request request : server.requests("/end"))
+                    if (request.path.contains(id)) Assert.assertEquals(request.json().getInt("expectedEntries"), 3);
+                Assert.assertEquals(warnings.stream().filter(text -> text.contains("was renamed to")).collect(
+                        java.util.stream.Collectors.toList()), java.util.List.of(
+                        "An older Helios journal was renamed to a.helios-journal.unverified and kept for inspection because "
+                                + "an oversized entry was retained. It will not be sent again."));
+                Assert.assertFalse(warnings.contains("Delivery is incomplete after replay; the journal was retained for inspection."));
+            } finally { Assert.assertTrue(finishAndStop(sink, "OK", 0)); }
+            Assert.assertTrue(finishAndStop(sink(server.config("later"), root, ignored -> { }), "OK", 0));
+            Assert.assertEquals(server.startAttempts.get("oversized").intValue(), 1);
+            Assert.assertEquals(server.ends.get("oversized").intValue(), 2);
+            Assert.assertTrue(Files.exists(unverified(saved)));
+        }
+    }
+
+    @Test
+    public void recoveryJournalsThatStayIncompleteAfterReplayAreRenamed() throws Exception {
+        try (HeliosStubServer server = new HeliosStubServer()) {
+            Path root = temp.create("helios-recovery-incomplete");
+            Path first = seed(root, server.config("first-gap"), "a", 2, false);
+            Path second = seed(root, server.config("second-gap"), "b", 2, false);
+            java.util.List<String> warnings = new CopyOnWriteArrayList<>();
+            HeliosSink sink = sink(server.config("current"), root, warnings::add);
+            try {
+                await(() -> !Files.exists(first) && Files.exists(unverified(first))
+                        && !Files.exists(second) && Files.exists(unverified(second)));
+                await(() -> warnings.stream().filter(text -> text.contains("was renamed to")).count() == 2);
+                Assert.assertEquals(server.ends.get("first-gap").intValue(), 2);
+                Assert.assertEquals(server.ends.get("second-gap").intValue(), 2);
+                Assert.assertEquals(warnings.stream().filter(text -> text.contains("was renamed to")).collect(
+                        java.util.stream.Collectors.toList()), java.util.List.of(
+                        "An older Helios journal was renamed to a.helios-journal.unverified and kept for inspection because "
+                                + "delivery is incomplete after replay. It will not be sent again.",
+                        "An older Helios journal was renamed to b.helios-journal.unverified and kept for inspection because "
+                                + "delivery is incomplete after replay. It will not be sent again."));
+                Assert.assertFalse(warnings.contains("Delivery is incomplete after replay; the journal was retained for inspection."));
+            } finally { Assert.assertTrue(finishAndStop(sink, "OK", 0)); }
+            Assert.assertTrue(finishAndStop(sink(server.config("later"), root, ignored -> { }), "OK", 0));
+            Assert.assertEquals(server.startAttempts.get("first-gap").intValue(), 1);
+            Assert.assertEquals(server.startAttempts.get("second-gap").intValue(), 1);
+        }
+    }
+
+    @Test
+    public void theCurrentSessionsIncompleteJournalKeepsItsNameUntilTheNextStart() throws Exception {
+        try (HeliosStubServer server = new HeliosStubServer()) {
+            server.maxEntriesBytes = 256;
+            Path root = temp.create("helios-current-incomplete");
+            java.util.List<String> warnings = new CopyOnWriteArrayList<>();
+            HeliosSink first = sink(server.config("incomplete"), root, warnings::add);
+            first.append(entry(0));
+            JSONObject large = entry(1);
+            large.getJSONArray("entries").getJSONObject(0).put("message", "x".repeat(1024));
+            first.append(large);
+            first.append(entry(2));
+            Assert.assertFalse(finishAndStop(first, "OK", 3));
+            Path saved;
+            try (java.util.stream.Stream<Path> files = Files.walk(root)) {
+                saved = files.filter(path -> path.toString().endsWith(".helios-journal")).findFirst().orElseThrow();
+            }
+            Assert.assertTrue(Files.exists(saved));
+            try (java.util.stream.Stream<Path> files = Files.walk(root)) {
+                Assert.assertFalse(files.anyMatch(path -> path.toString().endsWith(".unverified")));
+            }
+            Assert.assertFalse(warnings.stream().anyMatch(text -> text.contains("was renamed to")));
+            Assert.assertTrue(warnings.contains("Delivery is incomplete after replay; the journal was retained for inspection."));
+            java.util.List<String> recoveryWarnings = new CopyOnWriteArrayList<>();
+            HeliosSink second = sink(server.config("next"), root, recoveryWarnings::add);
+            try {
+                await(() -> !Files.exists(saved) && Files.exists(unverified(saved)));
+                await(() -> recoveryWarnings.stream().anyMatch(text -> text.contains("was renamed to")));
+                Assert.assertEquals(recoveryWarnings.stream().filter(text -> text.contains("was renamed to")).count(), 1L);
+            } finally { Assert.assertTrue(finishAndStop(second, "OK", 0)); }
+            int ends = server.ends.get("incomplete");
+            Assert.assertTrue(finishAndStop(sink(server.config("later"), root, ignored -> { }), "OK", 0));
+            Assert.assertEquals(server.ends.get("incomplete").intValue(), ends);
+        }
+    }
+
+    private static JSONObject closing(int expected) {
+        return new JSONObject().put("status", "OK").put("expectedEntries", expected);
+    }
+
+    /** A finished sink keeps its media worker for a moment: stop it, so that it cannot recreate the folder that the class deletes. */
+    private static boolean finishAndStop(HeliosSink sink, String status, int expected) throws Exception {
+        try { return sink.finish(status, expected); }
+        finally { sink.stopMedia(); }
     }
 
     private static Path unverified(Path journal) { return journal.resolveSibling(journal.getFileName() + ".unverified"); }
@@ -340,7 +491,7 @@ public class HeliosDeliveryTest {
                 .put("loggerSessionId", UUID.randomUUID().toString()).put("sessionIdentity", true);
         try (HeliosJournal journal = new HeliosJournal(path, start)) {
             journal.append(entry(0));
-            if (!torn && expected >= 0) journal.append(new JSONObject().put("status", "OK").put("expectedEntries", expected));
+            if (!torn && expected >= 0) journal.append(closing(expected));
         }
         if (torn) Files.writeString(path, "{partial", java.nio.file.StandardOpenOption.APPEND);
         return path;

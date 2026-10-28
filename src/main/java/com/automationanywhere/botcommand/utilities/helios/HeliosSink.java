@@ -148,7 +148,13 @@ public final class HeliosSink {
                     // Closed first: Windows cannot rename an open file. A failed rename retries at the next start.
                     if (previous.unverified) {
                         Path path = previous.journal.path;
-                        try { Files.move(path, path.resolveSibling(path.getFileName() + ".unverified")); }
+                        try {
+                            Path renamed = Files.move(path, path.resolveSibling(path.getFileName() + ".unverified"));
+                            if (previous.unverifiedReason != null)
+                                warning.accept("An older Helios journal was renamed to " + renamed.getFileName()
+                                        + " and kept for inspection because " + previous.unverifiedReason
+                                        + ". It will not be sent again.");
+                        }
                         catch (IOException retained) { /* kept, or already renamed by another sender */ }
                     }
                     previous = null;
@@ -175,8 +181,9 @@ public final class HeliosSink {
         boolean refused;
         boolean replayed;
         boolean skipped;
-        /** An older journal that can never be verified, after Helios stored all its complete records once. */
+        /** An older journal retained for inspection instead of another recovery attempt. */
         boolean unverified;
+        String unverifiedReason;
         int batchEntries = HeliosJournal.BATCH_ENTRIES;
         JSONObject pending;
 
@@ -215,7 +222,7 @@ public final class HeliosSink {
                 if (body == null) {
                     // No closing record means a previous run crashed. Upload its available rows,
                     // but never invent a verified close for that run.
-                    unverified = flush && journal != HeliosSink.this.journal && !skipped;
+                    if (flush && journal != HeliosSink.this.journal) keep(null);
                     return flush && journal != HeliosSink.this.journal;
                 }
                 String path = "/api/ingest/sessions/" + sessionId;
@@ -277,7 +284,8 @@ public final class HeliosSink {
                 if (error.status == 409 && error.missingEntries) {
                     if (replayed) {
                         refused = true;
-                        warning.accept("Delivery is incomplete after replay; the journal was retained for inspection.");
+                        if (journal != HeliosSink.this.journal) keep("delivery is incomplete after replay");
+                        else warning.accept("Delivery is incomplete after replay; the journal was retained for inspection.");
                         return false;
                     }
                     replayed = true;
@@ -292,12 +300,17 @@ public final class HeliosSink {
                 delay(error.retryMillis);
             } catch (InvalidObjectException corrupt) {
                 refused = true;
-                unverified = journal != HeliosSink.this.journal && !skipped;
+                if (journal != HeliosSink.this.journal) keep(null);
                 warning.accept("A damaged journal was retained after sending its complete records.");
             } catch (IOException | RuntimeException error) {
                 delay(0);
             }
             return false;
+        }
+
+        private void keep(String otherReason) {
+            unverified = true;
+            unverifiedReason = skipped ? "an oversized entry was retained" : otherReason;
         }
 
         private void delay(long serverDelay) {

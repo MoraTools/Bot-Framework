@@ -9,7 +9,7 @@ the binding API contract lives in `../helios-cloud/plan.md`.
 ## Build
 
 JDK 11 only (`gradle.properties` → `org.gradle.java.home`). `./gradlew clean test shadowJar --console=plain`.
-On Linux 14 of 328 tests fail and 4 are skipped for Windows-only reasons (bundled ffmpeg.exe, file-age semantics,
+On Linux 14 of 340 tests fail and 4 are skipped for Windows-only reasons (bundled ffmpeg.exe, file-age semantics,
 desktop screen capture, junctions, drive letters); the Windows build host is the acceptance environment.
 Output: `build/libs/A360BotFramework-<version>.jar`.
 
