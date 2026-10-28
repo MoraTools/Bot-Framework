@@ -335,6 +335,7 @@ public final class HeliosMediaOutbox {
                         if (pin == null) continue;
                         send(manifest);
                     } catch (IOException | RuntimeException damaged) {
+                        if (stopping) throw damaged;
                         if (!damagedManifestWarned) {
                             damagedManifestWarned = true;
                             warning.accept("A media record could not be processed (" + errorType(damaged) + "). It is retained; other media delivery continues.");
@@ -346,11 +347,18 @@ public final class HeliosMediaOutbox {
                 Thread.sleep(200);
             } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); return; }
             catch (IOException | RuntimeException error) {
-                warning.accept("Media delivery is pending. Saved media will retry at the next Helios logger start.");
+                // stop() interrupts the worker, and a file channel throws when its thread is interrupted.
+                if (!stopping || mediaPending()) warning.accept("Media delivery is pending. Saved media will retry at the next Helios logger start.");
                 try { Thread.sleep(1000); }
                 catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); return; }
             }
         }
+    }
+
+    /** True while a record of this logger is on disk: its media is not delivered yet. A folder that cannot be listed counts as pending. */
+    private boolean mediaPending() {
+        try { return jobs(directory).stream().anyMatch(path -> path.getFileName().toString().startsWith(loggerId + "-")); }
+        catch (IOException | RuntimeException unreadable) { return true; }
     }
 
     private JSONObject readJob(Path path) {

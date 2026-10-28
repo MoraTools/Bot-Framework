@@ -434,6 +434,58 @@ public class HeliosMediaTest {
         }
     }
 
+    @Test public void stopInterruptingTheWorkerWritesNoWarningWhenNoMediaIsLeft() throws Exception {
+        try (HeliosStubServer server = HeliosStubServer.withMedia()) {
+            Path root = temp.create("helios-media-stop-empty");
+            List<String> warnings = java.util.Collections.synchronizedList(new ArrayList<>());
+            startAndStopAtTheRootMutex(server, root, warnings);
+            Assert.assertTrue(warnings.isEmpty(), warnings.toString());
+        }
+    }
+
+    @Test public void stopInterruptingTheWorkerWarnsOnceWhenMediaOfThisLoggerIsLeft() throws Exception {
+        try (HeliosStubServer server = HeliosStubServer.withMedia()) {
+            Path root = temp.create("helios-media-stop-pending");
+            // The record is saved while no worker runs: a worker that lists the folder during a save can fail on its own.
+            HeliosMediaOutbox saved = outbox(server, root, "logger", "journal");
+            saved.stop();
+            saved.register(0, new ErrorMedia(png(root), null, null, false));
+            Assert.assertTrue(Files.exists(root.resolve("media/partition/logger-0-screenshot.json")));
+            List<String> warnings = java.util.Collections.synchronizedList(new ArrayList<>());
+            startAndStopAtTheRootMutex(server, root, warnings);
+            Assert.assertEquals(warnings, List.of("Media delivery is pending. Saved media will retry at the next Helios logger start."), warnings.toString());
+        }
+    }
+
+    @Test public void stopInterruptingTheWorkerWritesNoWarningWhenOnlyAnotherLoggersMediaIsLeft() throws Exception {
+        try (HeliosStubServer server = HeliosStubServer.withMedia()) {
+            Path root = temp.create("helios-media-stop-other");
+            HeliosMediaOutbox other = outbox(server, root, "other", "other-journal");
+            other.stop();
+            other.register(0, new ErrorMedia(png(root), null, null, false));
+            Assert.assertTrue(Files.exists(root.resolve("media/partition/other-0-screenshot.json")));
+            List<String> warnings = java.util.Collections.synchronizedList(new ArrayList<>());
+            startAndStopAtTheRootMutex(server, root, warnings);
+            Assert.assertTrue(warnings.isEmpty(), warnings.toString());
+        }
+    }
+
+    @Test public void aRealIoFailureWhileRunningStillWarnsAboutPendingMedia() throws Exception {
+        try (HeliosStubServer server = HeliosStubServer.withMedia()) {
+            Path root = temp.create("helios-media-stop-failure");
+            List<String> warnings = java.util.Collections.synchronizedList(new ArrayList<>());
+            HeliosMediaOutbox media = new HeliosMediaOutbox(root, root.resolve("partition"), "logger", "journal",
+                    server.config("activity"), HttpClient.newHttpClient(), warnings::add);
+            try {
+                await(() -> {
+                    try { Files.deleteIfExists(root.resolve("media/partition")); return true; }
+                    catch (Exception busy) { return false; }
+                });
+                await(() -> warnings.contains("Media delivery is pending. Saved media will retry at the next Helios logger start."));
+            } finally { media.stop(); }
+        }
+    }
+
     @Test public void endWaitStopsAtItsCapWhenTheUploadKeepsFailing() throws Exception {
         try (HeliosStubServer server = HeliosStubServer.withMedia()) {
             CountDownLatch release = new CountDownLatch(1);
@@ -519,6 +571,25 @@ public class HeliosMediaTest {
     private static HeliosMediaOutbox outbox(HeliosStubServer server, Path root, String logger, String journal) throws Exception {
         return new HeliosMediaOutbox(root, root.resolve("partition"), logger, journal, server.config("activity"),
                 HttpClient.newHttpClient(), ignored -> { });
+    }
+    /** Starts a worker while the root mutex is held and stops it when it waits for the mutex: its first file channel call,
+     *  {@code FileChannel.lock()}, then fails at once, as an interrupt inside that call does. */
+    private static void startAndStopAtTheRootMutex(HeliosStubServer server, Path root, List<String> warnings) throws Exception {
+        java.lang.reflect.Field mutexField = HeliosMediaOutbox.class.getDeclaredField("ROOT_MUTEX");
+        mutexField.setAccessible(true);
+        java.lang.reflect.Field workerField = HeliosMediaOutbox.class.getDeclaredField("worker");
+        workerField.setAccessible(true);
+        HeliosMediaOutbox media;
+        synchronized (mutexField.get(null)) {
+            media = new HeliosMediaOutbox(root, root.resolve("partition"), "logger", "journal",
+                    server.config("activity"), HttpClient.newHttpClient(), warnings::add);
+            Thread waiting = (Thread) workerField.get(media);
+            try { await(() -> waiting.getState() == Thread.State.BLOCKED); }
+            finally { media.stop(); }
+        }
+        Thread worker = (Thread) workerField.get(media);
+        worker.join(5000);
+        Assert.assertFalse(worker.isAlive());
     }
     /** The bytes of a screenshot or video: {@code .../entries/<ordinal>/media/<kind>}. */
     private static boolean isUpload(HeliosStubServer.Request request) { return request.path.split("/").length == 9; }
