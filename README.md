@@ -20,6 +20,7 @@
 - An invalid Helios URL gives one warning, saves nothing for Helios, and `Stop Logger Session` does not wait. Helios Cloud 0.5.0 or later is required; code for older servers and journals is removed.
 - Crash recovery does not write a `salvaged/` recording when the log folder of the dead session is gone.
 - HTML logs use one escaper. Variable names, column names, Machine, User, Source and attachment link text keep non-ASCII characters as UTF-8 (before: named entities such as `&eacute;`), and `'` is written as `&#39;` (before: not escaped). Message text is unchanged.
+- **Runtime mode** (5.4.0): `mode_start` stores DEV, QA or PRD in a session; in the master, save it as `runtimeMode` with **GLOBAL** scope. Child taskbots read it with `mode_get` and the If condition `mode_is`, with no inputs, and get the default (DEV) when they run alone. See [Runtime mode: start](docs/mode/StartRuntimeMode.md).
 
 ## Overview
 Designed to streamline bot development, enhance logging, and facilitate comprehensive documentation within tasks for A360. Tailored for efficiency, consistency, and ease of use, this package addresses common challenges in bot development and maintenance, making it an indispensable tool for modern automation projects.
