@@ -1,6 +1,6 @@
 # A360 Bot Framework Package
 
-**Version 5.3.4** - maintained by **jamir-boop**, forked from the original A360 Tools package.
+**Version 5.4.0** - maintained by **jamir-boop**, forked from the original A360 Tools package.
 
 ## 5.x changes
 
@@ -88,6 +88,9 @@ Designed to streamline bot development, enhance logging, and facilitate comprehe
 
 
 ## Activity Summary
+- **[Runtime mode: start](docs/mode/StartRuntimeMode.md)** (`mode_start`): Stores DEV, QA or PRD in a session. In the master, save as `runtimeMode` with **GLOBAL** scope so child taskbots can read it without inputs.
+- **[Runtime mode: get](docs/mode/GetRuntimeMode.md)** (`mode_get`): Returns the session mode, or a default (DEV) when the session does not exist.
+- **[Runtime mode is](docs/mode/IsRuntimeMode.md)** (`mode_is`): Tests the effective mode in an If condition, with the same default for standalone child taskbots.
 - **Config Read JSON/XML**: Imports configuration data from JSON and XML into dictionaries.
 - **Device Close Application**: Terminates the listed applications at once. Unsaved work is lost.
 - **Device Create Folders**: Automates the creation of directories, ensuring the existence of necessary parent directories.
